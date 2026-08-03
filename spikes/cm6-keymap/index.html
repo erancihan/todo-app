@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Daybook spike — CodeMirror 6 keymap</title>
+    <style>
+      /* Throwaway spike styling. Deliberately not Tailwind: this page must run
+         from `vite preview` on any device with no build-tooling assumptions. */
+      :root {
+        color-scheme: dark;
+        --bg: #0b0c0e;
+        --card: #131518;
+        --border: #262a30;
+        --fg: #e9ecf1;
+        --muted: #9ba3ae;
+        --pass: #34c77b;
+        --fail: #f26d6d;
+        --accent: #6e7bff;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 24px;
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.5 ui-sans-serif, system-ui, sans-serif;
+      }
+      h1 { font-size: 20px; margin: 0 0 4px; }
+      h2 { font-size: 15px; margin: 24px 0 8px; }
+      p.sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+      .panes { display: grid; grid-template-columns: 260px 1fr; gap: 16px; }
+      @media (max-width: 720px) { .panes { grid-template-columns: 1fr; } }
+      .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+      #list { list-style: none; margin: 0; padding: 0; outline: none; }
+      #list li {
+        padding: 6px 10px; min-height: 30px; border-radius: 6px;
+        font-size: 13px; cursor: pointer;
+      }
+      #list li[aria-selected="true"] { background: #23262b; box-shadow: inset 2px 0 0 var(--accent); }
+      #list:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+      .cm-editor { border-radius: 6px; min-height: 180px; font-size: 16px; }
+      .cm-editor.cm-focused { outline: 2px solid var(--accent); }
+      #mode {
+        position: fixed; right: 16px; bottom: 16px; padding: 4px 10px;
+        border: 1px solid var(--border); border-radius: 9999px;
+        background: var(--card); font: 11px ui-monospace, monospace; letter-spacing: .08em;
+      }
+      table { border-collapse: collapse; width: 100%; font-size: 13px; }
+      td { padding: 5px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+      td.verdict { font: 11px ui-monospace, monospace; width: 52px; }
+      .pass { color: var(--pass); }
+      .fail { color: var(--fail); }
+      #summary { margin: 12px 0 0; font-size: 14px; font-weight: 600; }
+      #log { font: 11px ui-monospace, monospace; color: var(--muted); white-space: pre-wrap; margin-top: 8px; }
+      /* Mobile accessory bar — the on-screen Submit that replaces Ctrl+Enter,
+         because the soft Return must stay a newline. */
+      #accessory {
+        position: fixed; left: 0; right: 0; bottom: 0; display: none;
+        gap: 8px; padding: 8px; background: var(--card); border-top: 1px solid var(--border);
+      }
+      #accessory button { min-height: 44px; min-width: 44px; flex: 1; font-size: 15px; }
+      @media (pointer: coarse) { #accessory { display: flex; } }
+      button {
+        background: #1a1d21; color: var(--fg); border: 1px solid var(--border);
+        border-radius: 8px; padding: 8px 12px; font-size: 13px; cursor: pointer;
+      }
+      button.primary { background: var(--accent); color: #0b0c0e; border-color: transparent; }
+    </style>
+  </head>
+  <body>
+    <h1>Spike 3 — CodeMirror 6 keymap</h1>
+    <p class="sub">
+      Phase 0 exit criterion: <code>Ctrl/Cmd+Enter</code> submits while
+      <code>Enter</code>/<code>Shift+Enter</code> insert a newline, identically on
+      every WebView engine — plus clean arrow-key focus handoff between the list and
+      the editor. Assertions run automatically on load against the real resolver in
+      <code>app/src/core/keymap.ts</code>.
+    </p>
+
+    <h2>Automated assertions</h2>
+    <div class="card">
+      <table id="results"></table>
+      <p id="summary">running…</p>
+      <p id="log"></p>
+      <p style="margin-top:12px"><button id="rerun" type="button">Re-run</button></p>
+    </div>
+
+    <h2>Manual harness — drive this by hand on each engine</h2>
+    <div class="panes">
+      <div class="card">
+        <ul id="list" tabindex="0" role="listbox" aria-label="Todos">
+          <li role="option" aria-selected="true">Ship EOD report v1</li>
+          <li role="option" aria-selected="false">Query event log by date range</li>
+          <li role="option" aria-selected="false">Carry-over logic</li>
+        </ul>
+        <p class="sub" style="margin:8px 0 0;font-size:12px">
+          <code>j</code>/<code>k</code>/arrows move · <code>e</code> or
+          <code>Enter</code> edits
+        </p>
+      </div>
+      <div class="card">
+        <div id="editor"></div>
+        <p class="sub" style="margin:8px 0 0;font-size:12px">
+          <code>Enter</code>/<code>Shift+Enter</code> newline ·
+          <code>Ctrl/Cmd+Enter</code> submit · <code>Esc</code> back to list
+        </p>
+      </div>
+    </div>
+
+    <div id="mode">LIST</div>
+    <div id="accessory">
+      <button type="button" id="acc-submit" class="primary">✓ Submit</button>
+      <button type="button" id="acc-done">Done</button>
+    </div>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

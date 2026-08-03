@@ -1,0 +1,24 @@
+[package]
+name = "daybook-relay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Daybook sync relay: one self-contained Axum binary sized for a $5 VPS."
+
+[[bin]]
+name = "daybook-relay"
+path = "src/main.rs"
+
+[dependencies]
+daybook-core = { path = "../core" }
+axum = { workspace = true }
+tokio = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+rusqlite = { workspace = true }

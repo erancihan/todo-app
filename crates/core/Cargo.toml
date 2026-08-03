@@ -1,0 +1,35 @@
+[package]
+name = "daybook-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Daybook engine: op log, HLC clock, body CRDT, SQLite projection. Builds native (Tauri) and wasm32 (browser PWA)."
+
+[lib]
+# `cdylib` so the wasm32 build can be linked by wasm-bindgen from a thin spike/shell
+# crate; `rlib` so the Tauri shell and the relay can link it natively.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+yrs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+# Native-only. The browser replica reaches SQLite through sqlite-wasm + OPFS in JS
+# (docs/02-architecture.md §3), so rusqlite must never enter the wasm32 build.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rusqlite = { workspace = true }
+
+# wasm32 needs an explicit randomness backend for UUIDv7 and a browser clock for
+# the HLC; both come from the host JS environment.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+uuid = { workspace = true, features = ["js"] }
+getrandom = { workspace = true, features = ["wasm_js"] }
+js-sys = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

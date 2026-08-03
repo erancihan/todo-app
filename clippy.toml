@@ -1,0 +1,4 @@
+# The node tree is capped at ~8 levels (docs/03-data-model.md §3.1) but op-log and
+# projection code still fans out; keep the cognitive-complexity bar explicit.
+cognitive-complexity-threshold = 30
+too-many-arguments-threshold = 8

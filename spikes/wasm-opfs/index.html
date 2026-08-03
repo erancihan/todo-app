@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Daybook spike — core on wasm32 + sqlite-wasm/OPFS</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b0c0e; --card: #131518; --border: #262a30;
+        --fg: #e9ecf1; --muted: #9ba3ae;
+        --pass: #34c77b; --fail: #f26d6d; --warn: #f5b547; --accent: #6e7bff;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; padding: 24px; background: var(--bg); color: var(--fg);
+        font: 14px/1.5 ui-sans-serif, system-ui, sans-serif;
+      }
+      h1 { font-size: 20px; margin: 0 0 4px; }
+      h2 { font-size: 15px; margin: 24px 0 8px; }
+      p.sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+      .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+      table { border-collapse: collapse; width: 100%; font-size: 13px; }
+      td { padding: 5px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+      td.verdict { font: 11px ui-monospace, monospace; width: 52px; }
+      .pass { color: var(--pass); } .fail { color: var(--fail); } .warn { color: var(--warn); }
+      #summary { margin: 12px 0 0; font-size: 14px; font-weight: 600; }
+      pre { font: 11px ui-monospace, monospace; color: var(--muted); white-space: pre-wrap; margin: 4px 0 0; }
+      button {
+        background: #1a1d21; color: var(--fg); border: 1px solid var(--border);
+        border-radius: 8px; padding: 8px 12px; font-size: 13px; cursor: pointer;
+      }
+      code { font: 12px ui-monospace, monospace; color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <h1>Spike 2 — <code>daybook-core</code> on wasm32 + sqlite-wasm/OPFS</h1>
+    <p class="sub">
+      Phase 0 exit criterion: <em>the core slice compiles to wasm32 and round-trips
+      a write through sqlite-wasm + OPFS in the browser.</em> Rust owns the engine
+      (Y.Text merge, ids, order keys, schema); JS owns only the SQLite driver.
+    </p>
+
+    <div class="card">
+      <table id="results"></table>
+      <p id="summary">running…</p>
+      <p style="margin-top:12px">
+        <button id="rerun" type="button">Re-run</button>
+        <button id="wipe" type="button">Wipe OPFS database</button>
+      </p>
+    </div>
+
+    <h2>Environment</h2>
+    <div class="card"><pre id="env"></pre></div>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

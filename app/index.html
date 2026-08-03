@@ -1,0 +1,80 @@
+<!doctype html>
+<!-- Dark is the shipped default: `.dark` is on <html> from the first paint, so the
+     app never flashes light before a script runs (docs/04-ux-and-interaction.md §7). -->
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Daybook</title>
+    <link rel="stylesheet" href="/src/app.css" />
+  </head>
+  <body class="min-h-screen">
+    <main id="app" class="mx-auto max-w-2xl px-6 py-10" x-data="probePanel">
+      <header class="mb-8">
+        <h1 class="text-[1.375rem] font-[590] tracking-[-0.02em]">Daybook</h1>
+        <p class="mt-1 text-[0.8125rem] text-muted-foreground">
+          Phase 0 — proof of stack. This panel calls the Rust core through the
+          engine port and reports what came back.
+        </p>
+      </header>
+
+      <!-- Basecoat `card` + `btn`: plain HTML classes, no React, no component runtime. -->
+      <section class="card">
+        <header>
+          <h2 class="text-[0.9375rem] font-[560]">Engine port</h2>
+          <p class="text-[0.75rem] text-muted-foreground">
+            Runtime: <span class="font-mono" x-text="runtime"></span>
+          </p>
+        </header>
+
+        <section>
+          <p class="font-mono text-[0.75rem] text-muted-foreground break-all" x-text="echo"></p>
+
+          <ul class="mt-4 space-y-2">
+            <template x-for="probe in probes" :key="probe.name">
+              <li class="row-dense rounded-[var(--radius)] border border-border">
+                <div class="flex items-center gap-2">
+                  <span
+                    class="font-mono text-[0.6875rem]"
+                    :style="probe.passed
+                      ? 'color: var(--success)'
+                      : 'color: var(--destructive)'"
+                    x-text="probe.passed ? 'PASS' : 'FAIL'"
+                  ></span>
+                  <span class="text-[0.8125rem]" x-text="probe.name"></span>
+                </div>
+                <pre
+                  class="mt-1 whitespace-pre-wrap font-mono text-[0.6875rem] text-muted-foreground"
+                  x-text="probe.detail"
+                ></pre>
+              </li>
+            </template>
+          </ul>
+
+          <p
+            class="mt-4 text-[0.75rem]"
+            x-show="!busy && probes.length"
+            :style="allPassed ? 'color: var(--success)' : 'color: var(--destructive)'"
+            x-text="allPassed
+              ? 'All core probes passed on this host.'
+              : 'At least one probe did not pass — see detail above.'"
+          ></p>
+        </section>
+
+        <footer>
+          <button class="btn" type="button" @click="run()" :disabled="busy">
+            <span x-text="busy ? 'Running…' : 'Re-run probes'"></span>
+          </button>
+        </footer>
+      </section>
+
+      <p class="mt-6 text-[0.6875rem] text-muted-foreground">
+        Keymap harness and the WASM/OPFS probe live in
+        <span class="font-mono">spikes/</span> — see
+        <span class="font-mono">spikes/README.md</span>.
+      </p>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

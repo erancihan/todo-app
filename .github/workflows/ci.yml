@@ -1,0 +1,172 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Phase 0 is a go/no-go gate — a warning that slips through is a finding lost.
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  rust:
+    name: Rust — fmt, clippy, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the version; this action honors it.
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      # `crates/core` and `crates/relay` only. The Tauri shell needs a system
+      # WebView and is checked on macOS/Windows below — native Linux is not a
+      # target (docs/02-architecture.md §3), so there is nothing to gain from
+      # installing WebKitGTK here.
+      - name: Clippy
+        run: cargo clippy -p daybook-core -p daybook-relay --all-targets --all-features
+
+      - name: Test
+        run: cargo test -p daybook-core -p daybook-relay --all-features
+
+  wasm:
+    name: Rust — wasm32 build of crates/core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+
+      # The browser PWA is a tier-1 target, so "core still compiles to wasm32" is
+      # a build gate, not a nice-to-have. This is what catches a native-only
+      # dependency (std::time, rusqlite, threads) leaking into shared code.
+      - name: Build core for wasm32
+        run: cargo build -p daybook-core --target wasm32-unknown-unknown --release
+
+      - name: Clippy for wasm32
+        run: cargo clippy -p daybook-core --target wasm32-unknown-unknown --all-features
+
+  web:
+    name: Web — typecheck, test, build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # The keymap tests guard the bindings the PRD marks [REQUIRED]. If
+      # Ctrl/Cmd+Enter ever stops submitting, or Enter stops inserting a newline,
+      # the build must go red — on mobile that regression is unrecoverable.
+      - name: Unit tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  tauri:
+    name: Tauri shell — ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: tauri-${{ matrix.os }}
+
+      - name: Build the UI bundle
+        working-directory: app
+        run: |
+          npm ci
+          npm run build
+
+      # Compile only. Launching the window needs a desktop session, and mobile
+      # builds need signing — both are documented in spikes/mobile-README.md as
+      # manual steps.
+      - name: Build the Tauri shell
+        run: cargo build -p daybook-app
+
+  spikes:
+    name: Phase 0 spikes — headless Chromium
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: spikes
+
+      # Must match the `wasm-bindgen` crate pin exactly, or the generated glue
+      # will not match the module ABI — and it fails at runtime, not build time.
+      - name: Install wasm-bindgen-cli
+        run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
+
+      - name: Install spike deps
+        working-directory: spikes
+        run: npm install
+
+      - name: Build the wasm slice
+        working-directory: spikes
+        run: npm run build:wasm
+
+      - name: Install Chromium
+        working-directory: spikes
+        run: npx playwright install --with-deps chromium
+
+      # Covers the Chromium engine family only. WebKit/WKWebView is manual —
+      # see spikes/mobile-README.md.
+      - name: Run spike pages
+        working-directory: spikes
+        run: npm run test:headless

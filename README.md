@@ -2,7 +2,60 @@
 
 > An offline-first, keyboard-driven task app for iOS, macOS, Windows, and the browser (Android from the same codebase; Linux via the browser build) that captures as fast as a notepad and auto-generates a shareable markdown end-of-day report from what you actually did.
 
-**Status: Planning.** This repository is a design and architecture artifact. No application code yet — the docs below lock the product, stack, data model, UX, and roadmap before implementation begins.
+**Status: Phase 0 — proof-of-stack.** The planning docs below lock the product, stack, data model, UX, and roadmap. The repository skeleton and the Phase 0 spikes now exist; the go/no-go gate is **partly green** — desktop, browser, and CRDT criteria pass, and the iOS/Android criteria are still outstanding because they need a Mac and real devices. See [Repository layout](#repository-layout) and [`spikes/README.md`](spikes/README.md).
+
+---
+
+## Repository layout
+
+```
+├── crates/
+│   ├── core/          daybook-core — ONE crate, TWO builds
+│   │                    native  → linked into the Tauri shell
+│   │                    wasm32  → linked into the browser PWA
+│   │                  op log · HLC clock · BodyCrdt (yrs) · SQLite projection · blob queue
+│   └── relay/         daybook-relay — one self-contained Axum binary ($5-VPS sized)
+│                        embedded SQLite op log + filesystem blobs + in-relay auth
+│
+├── app/               the web UI — ONE bundle serving both hosts
+│   ├── src/core/      framework-agnostic plain TS: engine port, keymap. No Alpine here.
+│   ├── src/main.ts    Alpine boot — the view layer, and only the view layer
+│   ├── src/app.css    Tailwind v4 + Basecoat + the "Ink" OKLCH tokens
+│   └── src-tauri/     the Tauri v2 shell (desktop + mobile entry points)
+│
+├── spikes/            Phase 0 throwaway — outside the workspace, ships nothing
+├── docs/              the planning docs (source of truth; do not edit casually)
+└── .github/workflows/ CI — fmt, clippy, tests, wasm32 build, headless spikes
+```
+
+**The one seam that matters.** `app/src/core/engine-port.ts` defines a single
+interface with two implementations: Tauri IPC, and a direct WASM call. Everything
+above it is identical on every platform, so a WebView divergence can never become an
+*engine* divergence. `crates/core/src/store.rs` is the mirror of that seam on the
+Rust side — `rusqlite` natively, `sqlite-wasm` + OPFS in the browser, running the
+same `SCHEMA_SQL`.
+
+### Getting started
+
+```bash
+# Rust — the toolchain is pinned in rust-toolchain.toml
+cargo test -p daybook-core -p daybook-relay      # 33 tests, incl. the yrs convergence suite
+cargo build -p daybook-core --target wasm32-unknown-unknown   # the browser build must keep compiling
+
+# Web UI
+cd app && npm ci
+npm test            # keymap tests — guards the [REQUIRED] bindings
+npm run dev         # browser, http://localhost:1420
+npm run tauri dev   # desktop shell (needs a system WebView)
+
+# Phase 0 spikes
+cd spikes && npm install && npm run build:wasm && npm run test:headless
+```
+
+Pinned versions live in [`Cargo.toml`](Cargo.toml) (`[workspace.dependencies]`, all
+`=exact`), [`app/package.json`](app/package.json), and
+[`rust-toolchain.toml`](rust-toolchain.toml). Phase 0 is a gate, so a silent minor
+bump can invalidate a spike result — pins are deliberate, not incidental.
 
 ---
 

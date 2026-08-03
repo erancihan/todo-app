@@ -1,0 +1,38 @@
+# Rust
+/target
+**/target
+
+# Node
+node_modules/
+.npm/
+
+# Vite / build output
+app/dist/
+spikes/*/dist/
+spikes/*/pkg/
+
+# Tauri generated
+app/src-tauri/gen/
+app/src-tauri/target/
+
+# Relay runtime data (one directory — backup is a snapshot of it)
+daybook-data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Phase 0 spike artifacts (regenerate with `npm run build:wasm` / run-linux.sh)
+spikes/wasm-opfs/pkg/
+spikes/tauri-desktop/out/
+spikes/wasm-opfs/crate/target/
+
+# Mobile signing secrets — never commit
+app/src-tauri/gen/android/keystore.properties
+*.jks
+*.keystore

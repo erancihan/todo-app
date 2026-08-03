@@ -1,0 +1,27 @@
+[package]
+name = "daybook-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Daybook Tauri v2 shell — hosts the web UI and links daybook-core natively."
+
+[lib]
+# Tauri v2 mobile requires the app to be a library so the iOS/Android entry points
+# can call into it; the desktop binary is a thin wrapper over the same `run()`.
+name = "daybook_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "daybook-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { workspace = true, features = [] }
+
+[dependencies]
+daybook-core = { path = "../../crates/core" }
+tauri = { workspace = true, features = [] }
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -1,0 +1,10 @@
+[toolchain]
+# Pinned, not `stable`: Phase 0 is a go/no-go gate, so the toolchain a spike was
+# proven against is the toolchain CI uses. 1.97.1 is the floor for the pinned
+# `yrs` (`if let` guards) and `libsqlite3-sys` (`cfg_select!`).
+channel = "1.97.1"
+components = ["rustfmt", "clippy", "rust-src"]
+# wasm32-unknown-unknown is required: crates/core builds twice — natively for the
+# Tauri shell and to wasm32 for the browser PWA (see docs/02-architecture.md §3).
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"
