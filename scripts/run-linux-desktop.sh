@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
-# Spike 4 — launch the app/ UI inside the Tauri v2 shell and prove IPC into
-# daybook-core works (throwaway).
+# Run Daybook on the Linux desktop, headless, and capture proof it rendered.
 #
-# ## Why Linux, when Linux is not a target
+# ## Why this exists, when Linux is not a shipping target
 #
 # docs/02-architecture.md §3 deliberately drops native Linux — the browser build
-# covers it. This script exists because Linux is the only desktop platform this
-# environment has, and the thing under test is *the shell*: does the Vite bundle
-# load inside a Tauri v2 WebView, and does `invoke()` reach the Rust core? That
-# question is platform-independent. The WebView underneath is WebKitGTK, which is
-# the WebKit family but NOT WKWebView — see the caveat at the end.
+# covers it. This script is a **development** convenience, not a claim that Linux
+# is supported: it is how you run and screenshot the desktop shell on a machine
+# with no display, which is what CI and a headless dev box have.
 #
-# For the tier-1 desktops, run `npm run tauri dev` on macOS or Windows; no script
-# needed, and the same window should render the same probe rows.
+# The WebView underneath is WebKitGTK. That is the WebKit *family* but NOT
+# WKWebView, so a green run here is evidence the shell, the IPC surface, and the
+# UI work — and is not evidence about iOS or macOS rendering.
+#
+# On a desktop with a display, just use `npm run tauri dev` from app/.
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-OUT_DIR="${1:-$REPO_ROOT/spikes/tauri-desktop/out}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OUT_DIR="${1:-$REPO_ROOT/target/desktop-run}"
 DISPLAY_NUM=":99"
 SCREEN="1280x900x24"
 
@@ -102,8 +102,9 @@ echo "PASS: the Tauri window launched, stayed up, and rendered the dark UI."
 echo "  screenshot: $OUT_DIR/tauri-window.png"
 echo "  log:        $OUT_DIR/app.log"
 echo
-echo "Check the screenshot for two PASS rows — those are IPC round-trips into"
-echo "daybook-core (yrs merge + rusqlite write/read), not client-side stubs."
+echo "The window should show the todo list with an open capture row, the EDIT"
+echo "mode pill, and 'tauri/linux' in the header — all of it driven by"
+echo "daybook-core over IPC against the on-disk SQLite projection."
 echo
 echo "CAVEAT: this is WebKitGTK, not WKWebView. It shows the shell and IPC work;"
 echo "it is NOT evidence for iOS/macOS rendering. See spikes/mobile-README.md."

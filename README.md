@@ -2,7 +2,10 @@
 
 > An offline-first, keyboard-driven task app for iOS, macOS, Windows, and the browser (Android from the same codebase; Linux via the browser build) that captures as fast as a notepad and auto-generates a shareable markdown end-of-day report from what you actually did.
 
-**Status: Phase 0 — proof-of-stack.** The planning docs below lock the product, stack, data model, UX, and roadmap. The repository skeleton and the Phase 0 spikes now exist; the go/no-go gate is **partly green** — desktop, browser, and CRDT criteria pass, and the iOS/Android criteria are still outstanding because they need a Mac and real devices. See [Repository layout](#repository-layout) and [`spikes/README.md`](spikes/README.md).
+**Status: Phase 1 — MVP core (in progress).** The planning docs below lock the product, stack, data model, UX, and roadmap.
+
+- **Phase 0 (proof-of-stack)** — partly green. The CRDT, browser/WASM, keymap, and desktop-shell criteria pass; the **iOS/Android criteria are outstanding** because they need a Mac and real devices. See [`spikes/README.md`](spikes/README.md) and the run book in [`spikes/mobile-README.md`](spikes/mobile-README.md).
+- **Phase 1 (MVP core)** — the capture loop, single-table NODE model, event log, ordering, promotion, tags, and collections are implemented and run on **the browser and the Linux desktop**. Windows, macOS, iOS, and Android are untested here and are the owner's next targets.
 
 ---
 
@@ -11,51 +14,84 @@
 ```
 ├── crates/
 │   ├── core/          daybook-core — ONE crate, TWO builds
-│   │                    native  → linked into the Tauri shell
-│   │                    wasm32  → linked into the browser PWA
-│   │                  op log · HLC clock · BodyCrdt (yrs) · SQLite projection · blob queue
+│   │   src/engine.rs    ← the Phase 1 engine: NODE CRUD, event log, ordering,
+│   │                      promotion, tags, collections. Written ONCE; both
+│   │                      hosts run this exact code.
+│   │   src/store.rs     ← the only place the two builds differ (see below)
+│   │   src/body.rs      ← BodyCrdt trait + yrs Y.Text
+│   │   src/wasm.rs      ← wasm32-only bindgen surface for the PWA
 │   └── relay/         daybook-relay — one self-contained Axum binary ($5-VPS sized)
 │                        embedded SQLite op log + filesystem blobs + in-relay auth
 │
 ├── app/               the web UI — ONE bundle serving both hosts
-│   ├── src/core/      framework-agnostic plain TS: engine port, keymap. No Alpine here.
+│   ├── src/core/      framework-agnostic plain TS. No Alpine in here.
+│   │                    engine-port.ts    the seam (Tauri IPC | WASM worker)
+│   │                    list-controller.ts mode, focus, what each key does
+│   │                    keymap.ts          the authoritative bindings
+│   │                    body-editor.ts     CodeMirror 6
+│   │                    db-worker.ts       sqlite-wasm + OPFS driver
 │   ├── src/main.ts    Alpine boot — the view layer, and only the view layer
-│   ├── src/app.css    Tailwind v4 + Basecoat + the "Ink" OKLCH tokens
 │   └── src-tauri/     the Tauri v2 shell (desktop + mobile entry points)
 │
+├── scripts/           run-linux-desktop.sh — headless desktop run + screenshot
 ├── spikes/            Phase 0 throwaway — outside the workspace, ships nothing
 ├── docs/              the planning docs (source of truth; do not edit casually)
-└── .github/workflows/ CI — fmt, clippy, tests, wasm32 build, headless spikes
+└── .github/workflows/ CI — fmt, clippy, tests, wasm32 build, browser smoke
 ```
 
-**The one seam that matters.** `app/src/core/engine-port.ts` defines a single
-interface with two implementations: Tauri IPC, and a direct WASM call. Everything
-above it is identical on every platform, so a WebView divergence can never become an
-*engine* divergence. `crates/core/src/store.rs` is the mirror of that seam on the
-Rust side — `rusqlite` natively, `sqlite-wasm` + OPFS in the browser, running the
-same `SCHEMA_SQL`.
+### The one seam that matters
+
+`crates/core/src/store.rs` defines a **deliberately tiny** `Store` trait: execute
+SQL, return rows. It makes no decisions and knows nothing about nodes.
+
+Everything that *thinks* lives above it in `engine.rs`, written once and shared
+verbatim by both targets — `rusqlite` natively, `sqlite-wasm` + OPFS in the
+browser, running the same `SCHEMA_SQL`. `app/src/core/engine-port.ts` mirrors that
+seam in TypeScript: one interface, two pure-marshalling implementations.
+
+The payoff: a WebView divergence can never become an *engine* divergence, because
+there is only one engine. Widening `Store` is how that guarantee would be lost.
 
 ### Getting started
 
 ```bash
 # Rust — the toolchain is pinned in rust-toolchain.toml
-cargo test -p daybook-core -p daybook-relay      # 33 tests, incl. the yrs convergence suite
-cargo build -p daybook-core --target wasm32-unknown-unknown   # the browser build must keep compiling
+cargo test -p daybook-core -p daybook-relay   # 68 tests, incl. the Phase 1 engine suite
+cargo build -p daybook-core --target wasm32-unknown-unknown   # the browser build is a gate
 
-# Web UI
+# Web UI. `npm run dev` builds the wasm engine first — without it there is no engine.
 cd app && npm ci
-npm test            # keymap tests — guards the [REQUIRED] bindings
-npm run dev         # browser, http://localhost:1420
-npm run tauri dev   # desktop shell (needs a system WebView)
+npm test                      # keymap + list-controller tests (44)
+npm run dev                   # browser, http://localhost:1420
+npm run tauri dev             # desktop shell (needs a system WebView)
+node scripts/smoke-browser.mjs  # drives the real app against real OPFS in Chromium
+
+# Headless Linux desktop run (no display needed) — writes a screenshot
+bash scripts/run-linux-desktop.sh
 
 # Phase 0 spikes
 cd spikes && npm install && npm run build:wasm && npm run test:headless
 ```
 
+Building the browser engine needs the wasm-bindgen CLI at the **exact** pinned
+version — a mismatch fails at runtime, not build time:
+
+```bash
+cargo install wasm-bindgen-cli --version 0.2.126 --locked
+```
+
 Pinned versions live in [`Cargo.toml`](Cargo.toml) (`[workspace.dependencies]`, all
 `=exact`), [`app/package.json`](app/package.json), and
-[`rust-toolchain.toml`](rust-toolchain.toml). Phase 0 is a gate, so a silent minor
-bump can invalidate a spike result — pins are deliberate, not incidental.
+[`rust-toolchain.toml`](rust-toolchain.toml).
+
+### Known deviations from the docs
+
+Both are flagged here rather than silently applied, and both are load-bearing:
+
+| Doc | Deviation | Why |
+| --- | --- | --- |
+| [03 §5.3](docs/03-data-model.md) | `order_key` jitter separator is **`-`**, not `:` | `:` (ASCII 58) sorts *above* digits `0`-`9`, so `"V:dev" > "V7:dev"` and sibling order inverts under SQLite's `ORDER BY`. `-` (45) sorts below all 62 base62 digits. Base62 itself is unchanged. Locked by a test over the whole alphabet. |
+| [02 §3](docs/02-architecture.md) | **Linux desktop** is a working develop-and-run target | The docs drop native Linux (the browser build covers it). It is not in the shipping matrix and is not packaged; it exists because it is what the current dev machine runs. WebKitGTK ≠ WKWebView, so a green Linux run says nothing about iOS/macOS. |
 
 ---
 

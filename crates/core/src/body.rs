@@ -115,8 +115,20 @@ impl YrsBody {
             // yrs client ids are 53-bit (JavaScript-safe); mask so a caller
             // passing a full u64 device hash cannot trip the internal assert.
             client_id: yrs::ClientID::new(client_id & ((1u64 << 53) - 1)),
+            // NOT the yrs default, which is `Bytes`. Yjs in JavaScript — and
+            // therefore `y-codemirror.next` and CodeMirror itself — addresses text
+            // in UTF-16 code units. Leaving this at `Bytes` would work perfectly on
+            // ASCII and then silently corrupt any body containing an accent, CJK
+            // character, or emoji the moment a JS peer edited it.
+            offset_kind: yrs::OffsetKind::Utf16,
             ..Default::default()
         })
+    }
+
+    /// UTF-16 length of the body — the offset space [`BodyCrdt::insert`] and
+    /// [`BodyCrdt::remove`] work in. Use this, never `text().len()`.
+    pub fn len_utf16(&self) -> u32 {
+        self.text().encode_utf16().count() as u32
     }
 }
 
@@ -199,10 +211,8 @@ mod tests {
         assert_eq!(a.text(), b.text());
 
         // Now both go offline and edit the same body concurrently.
-        a.insert(a.text().len() as u32, "- [ ] query event log\n")
-            .unwrap();
-        b.insert(b.text().len() as u32, "- [ ] carry-over logic\n")
-            .unwrap();
+        a.insert(a.len_utf16(), "- [ ] query event log\n").unwrap();
+        b.insert(b.len_utf16(), "- [ ] carry-over logic\n").unwrap();
         assert_ne!(a.text(), b.text(), "expected a genuine divergence to merge");
 
         sync(&mut a, &mut b);
@@ -333,6 +343,44 @@ mod tests {
         assert_eq!(a.text(), b.text(), "delete/insert did not converge");
         assert!(!a.text().contains("DELETE"), "delete was lost");
         assert!(a.text().contains("and add"), "concurrent insert was lost");
+    }
+
+    #[test]
+    fn offsets_are_utf16_not_bytes() {
+        // Locks the `OffsetKind::Utf16` choice. Under the yrs default (`Bytes`)
+        // these offsets would land mid-character and the assertions below fail —
+        // which is exactly the corruption a JS peer would cause on a body with
+        // any non-ASCII text in it.
+        let mut a = YrsBody::new(DEVICE_A);
+        a.insert(0, "héllo").unwrap(); // 5 UTF-16 units, 6 UTF-8 bytes
+        assert_eq!(a.len_utf16(), 5);
+
+        // Append at the UTF-16 end. Under byte offsets this index is out of range.
+        a.insert(5, "!").unwrap();
+        assert_eq!(a.text(), "héllo!");
+
+        // An emoji is a surrogate pair: 2 UTF-16 units, 4 UTF-8 bytes.
+        let mut b = YrsBody::new(DEVICE_B);
+        b.insert(0, "🌍x").unwrap();
+        assert_eq!(b.len_utf16(), 3);
+        b.remove(0, 2).unwrap(); // drop exactly the emoji
+        assert_eq!(b.text(), "x", "surrogate pair was not treated as 2 units");
+    }
+
+    #[test]
+    fn non_ascii_bodies_converge() {
+        let mut a = YrsBody::new(DEVICE_A);
+        a.insert(0, "café ").unwrap();
+        let mut b = YrsBody::from_snapshot(DEVICE_B, &a.snapshot().unwrap()).unwrap();
+
+        a.insert(a.len_utf16(), "α").unwrap();
+        b.insert(b.len_utf16(), "日本").unwrap();
+        sync(&mut a, &mut b);
+
+        assert_eq!(a.text(), b.text());
+        for marker in ["café", "α", "日本"] {
+            assert!(a.text().contains(marker), "lost {marker}");
+        }
     }
 
     #[test]

@@ -24,12 +24,16 @@ uuid = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rusqlite = { workspace = true }
 
-# wasm32 needs an explicit randomness backend for UUIDv7 and a browser clock for
-# the HLC; both come from the host JS environment.
+# wasm32 needs an explicit randomness backend for UUIDv7, a browser clock for the
+# HLC, and the bindgen surface the PWA calls into. All come from the host JS
+# environment; none of it enters the native build.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 uuid = { workspace = true, features = ["js"] }
 getrandom = { workspace = true, features = ["wasm_js"] }
 js-sys = { workspace = true }
+wasm-bindgen = { workspace = true }
+serde-wasm-bindgen = { workspace = true }
+console_error_panic_hook = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

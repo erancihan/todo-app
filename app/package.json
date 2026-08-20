@@ -9,8 +9,9 @@
     "npm": ">=10.9.0"
   },
   "scripts": {
-    "dev": "vite --port 1420 --strictPort",
-    "build": "tsc --noEmit && vite build",
+    "build:wasm": "bash scripts/build-wasm.sh",
+    "dev": "npm run build:wasm && vite --port 1420 --strictPort",
+    "build": "npm run build:wasm && tsc --noEmit && vite build",
     "preview": "vite preview --port 1420 --strictPort",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -33,6 +34,7 @@
     "@tailwindcss/vite": "4.3.3",
     "@tauri-apps/cli": "2.11.4",
     "@types/alpinejs": "3.13.11",
+    "playwright": "1.58.1",
     "tailwindcss": "4.3.3",
     "typescript": "5.9.3",
     "vite": "8.2.0",

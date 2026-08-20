@@ -14,11 +14,19 @@ renders a visible `PASS`/`FAIL`, and the headless runner exits non-zero on failu
 | --- | --- | --- |
 | **[`wasm-opfs/`](wasm-opfs/)** | `daybook-core` compiles to wasm32 and round-trips a write through sqlite-wasm + OPFS | 8 checks, headless |
 | **[`cm6-keymap/`](cm6-keymap/)** | `Enter`/`Shift+Enter` newline vs `Ctrl/Cmd+Enter` submit; list ↔ editor focus handoff | 10 checks, headless |
-| **[`tauri-desktop/`](tauri-desktop/)** | The `app/` UI launches in the Tauri v2 shell and `invoke()` reaches Rust | script + screenshot |
 | **[`mobile-README.md`](mobile-README.md)** | iOS / Android — **not run**, needs a Mac and devices | manual run book |
 
 The `yrs` spike is **not** here: its exit criterion is "verified in a unit test", so
 it lives with the code it tests, in [`crates/core/src/body.rs`](../crates/core/src/body.rs).
+
+The Tauri desktop spike has **graduated** out of this directory. Now that the shell
+runs the real Phase 1 app, launching it is a development task rather than a
+proof — see [`scripts/run-linux-desktop.sh`](../scripts/run-linux-desktop.sh).
+
+Two of these spikes are also now superseded by shipped code, and are kept only as
+the Phase 0 evidence trail: the browser engine lives in `app/src/core/db-worker.ts`,
+and the keymap is `app/src/core/keymap.ts` with its own unit tests. Delete this
+directory when the Phase 0 gate is fully closed.
 
 ## Run them
 
@@ -40,12 +48,12 @@ npm run dev
 # add --host 0.0.0.0 to reach it from a device on the LAN
 ```
 
-The Tauri desktop spike:
+The desktop run (now a dev script, not a spike):
 
 ```bash
 # from the repo root — Linux/Xvfb only; on macOS or Windows just use `npm run tauri dev`
-bash spikes/tauri-desktop/run-linux.sh
-# writes spikes/tauri-desktop/out/tauri-window.png
+bash scripts/run-linux-desktop.sh
+# writes target/desktop-run/tauri-window.png
 ```
 
 ## Coverage, honestly
@@ -75,3 +83,11 @@ Closing that gap is manual, and it is [`mobile-README.md`](mobile-README.md).
   success while the WebView was showing "Connection refused" — a debug build loads
   `devUrl`, so the dev server must be up first. The script now checks screenshot
   luminance, because Daybook boots dark and an error page is white.
+- **Only one tab can hold the OPFS database.** The SAH-pool VFS takes exclusive
+  sync access handles, so a second tab on the same origin fails to open it. The
+  app detects this and says so; a shared-worker or leader-election scheme is the
+  real fix, and it is Phase 4 browser-hardening work.
+- **`yrs` defaults to byte offsets, Yjs uses UTF-16.** `crates/core` sets
+  `OffsetKind::Utf16` explicitly. Left at the default it works perfectly on ASCII
+  and corrupts any body with an accent, CJK character, or emoji the moment a JS
+  peer edits it.

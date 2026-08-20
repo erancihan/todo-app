@@ -30,6 +30,55 @@ pub enum Status {
     Dropped,
 }
 
+impl Kind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Task => "task",
+            Kind::ChecklistItem => "checklist_item",
+        }
+    }
+
+    /// Unknown values read as `Task`. The projection is rebuildable, so a row
+    /// written by a newer version should degrade rather than fail the whole list.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "checklist_item" => Kind::ChecklistItem,
+            _ => Kind::Task,
+        }
+    }
+}
+
+impl Status {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Status::Inbox => "inbox",
+            Status::Todo => "todo",
+            Status::InProgress => "in_progress",
+            Status::Blocked => "blocked",
+            Status::Done => "done",
+            Status::Dropped => "dropped",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "todo" => Status::Todo,
+            "in_progress" => Status::InProgress,
+            "blocked" => Status::Blocked,
+            "done" => Status::Done,
+            "dropped" => Status::Dropped,
+            _ => Status::Inbox,
+        }
+    }
+
+    /// Whether this status counts as finished. `dropped` is deliberately *not*
+    /// done: it is abandoned work, and the EOD report must not claim it as an
+    /// accomplishment.
+    pub fn is_done(self) -> bool {
+        matches!(self, Status::Done)
+    }
+}
+
 /// Maximum tree depth. Promotion unlocks children, so the guard is enforced on
 /// every structural op (docs/03-data-model.md §9).
 pub const MAX_DEPTH: usize = 8;

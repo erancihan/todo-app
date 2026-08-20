@@ -29,10 +29,16 @@ daybook-data/
 
 # Phase 0 spike artifacts (regenerate with `npm run build:wasm` / run-linux.sh)
 spikes/wasm-opfs/pkg/
-spikes/tauri-desktop/out/
+
 spikes/wasm-opfs/crate/target/
 
 # Mobile signing secrets — never commit
 app/src-tauri/gen/android/keystore.properties
 *.jks
 *.keystore
+
+# Generated wasm bindings for the browser build (npm run build:wasm)
+app/src/core/wasm/
+
+# Headless desktop-run artifacts (scripts/run-linux-desktop.sh)
+target/desktop-run/

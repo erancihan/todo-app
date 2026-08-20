@@ -13,13 +13,17 @@
 //!
 //! ## Status
 //!
-//! Phase 0 (proof-of-stack). [`body`], [`hlc`], [`ids`], and [`order_key`] are
-//! implemented because the Phase 0 exit criteria test them. [`node`], [`event`],
-//! [`op`], and [`blob`] carry the types the model needs but their engines land in
-//! Phase 1 and Phase 2 — each is marked at its definition.
+//! Phase 1 (MVP core, local-only). [`engine`] is the centre of gravity: NODE CRUD,
+//! the append-only event log, ordering, promotion, tags, and collections, all
+//! written once against [`store::Store`] and shared verbatim by both targets.
+//!
+//! [`op`] and [`blob`] still carry types only — the sync channel and the blob
+//! queue are Phase 2, and each is marked at its definition.
 
+pub mod b64;
 pub mod blob;
 pub mod body;
+pub mod engine;
 pub mod event;
 pub mod hlc;
 pub mod ids;
@@ -28,9 +32,15 @@ pub mod op;
 pub mod order_key;
 pub mod store;
 
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
+
 pub use body::{BodyCrdt, BodyUpdate, StateVector, YrsBody};
+pub use engine::{CollectionView, Engine, EventView, NodeView, TagView};
 pub use hlc::{Hlc, HlcClock};
 pub use ids::{new_id, DeviceId, Id};
+pub use node::{Kind, Status};
+pub use store::{SqlValue, Store, StoreExt};
 
 /// Errors surfaced across the engine port to the TypeScript core/engine layer.
 #[derive(Debug, thiserror::Error)]

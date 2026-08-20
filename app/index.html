@@ -10,71 +10,192 @@
     <link rel="stylesheet" href="/src/app.css" />
   </head>
   <body class="min-h-screen">
-    <main id="app" class="mx-auto max-w-2xl px-6 py-10" x-data="probePanel">
-      <header class="mb-8">
+    <main id="app" x-data="daybook" class="mx-auto max-w-3xl px-6 py-8">
+      <header class="mb-5 flex items-baseline justify-between">
         <h1 class="text-[1.375rem] font-[590] tracking-[-0.02em]">Daybook</h1>
-        <p class="mt-1 text-[0.8125rem] text-muted-foreground">
-          Phase 0 — proof of stack. This panel calls the Rust core through the
-          engine port and reports what came back.
-        </p>
+        <span class="font-mono text-[0.6875rem] text-muted-foreground" x-text="runtime"></span>
       </header>
 
-      <!-- Basecoat `card` + `btn`: plain HTML classes, no React, no component runtime. -->
-      <section class="card">
-        <header>
-          <h2 class="text-[0.9375rem] font-[560]">Engine port</h2>
-          <p class="text-[0.75rem] text-muted-foreground">
-            Runtime: <span class="font-mono" x-text="runtime"></span>
-          </p>
-        </header>
+      <!-- Errors surface here rather than being swallowed into the console. -->
+      <div
+        x-show="state.error"
+        x-cloak
+        class="mb-4 rounded-[var(--radius)] border px-3 py-2 text-[0.8125rem]"
+        style="border-color: var(--destructive); color: var(--destructive)"
+        x-text="state.error"
+      ></div>
 
-        <section>
-          <p class="font-mono text-[0.75rem] text-muted-foreground break-all" x-text="echo"></p>
+      <!-- The list. `tabindex` so it can hold focus in LIST mode; the keydown
+           listener is global, registered by the controller. -->
+      <ul data-list tabindex="0" class="outline-none" role="tree" aria-label="Todos">
+        <template x-for="node in rows()" :key="node.id">
+          <li
+            role="treeitem"
+            :aria-selected="isFocused(node.id)"
+            :style="`margin-left: ${node.depth * 20}px`"
+            class="rounded-[var(--radius-sm)]"
+            :class="isFocused(node.id) ? 'bg-muted shadow-[inset_2px_0_0_var(--primary)]' : ''"
+          >
+            <div class="row-dense flex items-start gap-2" @click="onRowClick(node.id, $event)">
+              <button
+                type="button"
+                class="mt-[3px] size-[14px] shrink-0 rounded-[3px] border"
+                :style="node.status === 'done'
+                  ? 'background: var(--success); border-color: var(--success)'
+                  : 'border-color: var(--border)'"
+                :aria-label="node.status === 'done' ? 'Mark not done' : 'Mark done'"
+                @click="toggleDone(node, $event)"
+              ></button>
 
-          <ul class="mt-4 space-y-2">
-            <template x-for="probe in probes" :key="probe.name">
-              <li class="row-dense rounded-[var(--radius)] border border-border">
+              <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2">
                   <span
-                    class="font-mono text-[0.6875rem]"
-                    :style="probe.passed
-                      ? 'color: var(--success)'
-                      : 'color: var(--destructive)'"
-                    x-text="probe.passed ? 'PASS' : 'FAIL'"
+                    class="truncate text-[0.8125rem]"
+                    :class="node.status === 'done' ? 'line-through opacity-55' : ''"
+                    x-text="node.title || node.bodyMd.split('\n')[0] || 'Untitled'"
                   ></span>
-                  <span class="text-[0.8125rem]" x-text="probe.name"></span>
+
+                  <!-- A promoted sub-item keeps its place but gains a marker. -->
+                  <span
+                    x-show="node.promoted && node.parentId"
+                    x-cloak
+                    class="font-mono text-[0.625rem] text-muted-foreground"
+                    title="Promoted to a full todo"
+                    >↑</span
+                  >
+
+                  <template x-for="tag in node.tags" :key="tag.id">
+                    <span
+                      class="rounded-full px-1.5 py-px text-[0.6875rem]"
+                      :class="`tag-${tag.color}`"
+                      x-text="`#${tag.name}`"
+                    ></span>
+                  </template>
                 </div>
-                <pre
-                  class="mt-1 whitespace-pre-wrap font-mono text-[0.6875rem] text-muted-foreground"
-                  x-text="probe.detail"
-                ></pre>
+
+                <!-- The editor mounts here when this row is being edited. -->
+                <div x-show="isEditing(node.id)" x-cloak :data-editor-slot="node.id"></div>
+
+                <!-- Otherwise show a one-line preview of the body, if any. -->
+                <p
+                  x-show="!isEditing(node.id) && node.bodyMd.trim()"
+                  x-cloak
+                  class="truncate text-[0.75rem] text-muted-foreground"
+                  x-text="node.bodyMd.split('\n').filter(Boolean)[1] || ''"
+                ></p>
+              </div>
+            </div>
+          </li>
+        </template>
+      </ul>
+
+      <p
+        x-show="rows().length === 0"
+        x-cloak
+        class="row-dense text-[0.8125rem] text-muted-foreground"
+      >
+        Nothing yet. Press <kbd class="font-mono">n</kbd> to capture something.
+      </p>
+
+      <footer class="mt-6 text-[0.6875rem] text-muted-foreground">
+        <kbd class="font-mono">?</kbd> cheat sheet ·
+        <kbd class="font-mono">Ctrl/Cmd+K</kbd> palette ·
+        <kbd class="font-mono">Ctrl/Cmd+Enter</kbd> submit
+      </footer>
+
+      <!-- Mode pill: vim-style modality, but legible (docs §3). -->
+      <div
+        data-mode-pill
+        class="fixed bottom-4 right-4 rounded-full border px-2.5 py-1 font-mono text-[0.625rem] tracking-[0.08em]"
+        style="border-color: var(--border); background: var(--card)"
+        :style="state.mode === 'edit' ? 'color: var(--primary)' : ''"
+        aria-live="polite"
+        x-text="state.mode.toUpperCase()"
+      ></div>
+
+      <!-- `?` cheat sheet -->
+      <div
+        x-show="state.cheatSheetOpen"
+        x-cloak
+        class="fixed inset-0 z-40 flex items-center justify-center p-6"
+        style="background: rgb(0 0 0 / 0.55)"
+        @click="state.cheatSheetOpen = false"
+      >
+        <div
+          class="max-h-[80vh] w-full max-w-2xl overflow-y-auto rounded-[var(--radius-lg)] border p-5"
+          style="border-color: var(--border); background: var(--popover)"
+          @click.stop
+        >
+          <h2 class="mb-3 text-[0.9375rem] font-[560]">Keyboard</h2>
+          <div class="grid gap-5 sm:grid-cols-3">
+            <template x-for="section in cheatSheet" :key="section.title">
+              <div>
+                <h3
+                  class="mb-1.5 text-[0.6875rem] uppercase tracking-wide text-muted-foreground"
+                  x-text="section.title"
+                ></h3>
+                <template x-for="row in section.rows" :key="row.keys">
+                  <div class="flex justify-between gap-3 py-0.5 text-[0.75rem]">
+                    <span class="font-mono text-muted-foreground" x-text="row.keys"></span>
+                    <span class="text-right" x-text="row.action"></span>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- Ctrl/Cmd+K palette -->
+      <div
+        x-show="state.paletteOpen"
+        x-cloak
+        class="fixed inset-0 z-50 flex items-start justify-center p-6 pt-[15vh]"
+        style="background: rgb(0 0 0 / 0.55)"
+        @click="state.paletteOpen = false; paletteQuery = ''"
+      >
+        <div
+          class="w-full max-w-lg overflow-hidden rounded-[var(--radius-lg)] border"
+          style="border-color: var(--border); background: var(--popover)"
+          @click.stop
+        >
+          <input
+            x-model="paletteQuery"
+            x-init="$watch('state.paletteOpen', open => open && $nextTick(() => $el.focus()))"
+            type="text"
+            placeholder="Type a command…"
+            class="w-full border-b bg-transparent px-3 py-2.5 text-[0.875rem] outline-none"
+            style="border-color: var(--border)"
+            @keydown.escape="state.paletteOpen = false; paletteQuery = ''"
+            @keydown.enter="paletteResults()[0] && runCommand(paletteResults()[0].id)"
+          />
+          <ul class="max-h-80 overflow-y-auto py-1">
+            <template x-for="cmd in paletteResults()" :key="cmd.id">
+              <li>
+                <button
+                  type="button"
+                  class="flex w-full items-center justify-between px-3 py-1.5 text-left text-[0.8125rem] hover:bg-muted"
+                  @click="runCommand(cmd.id)"
+                >
+                  <span x-text="cmd.label"></span>
+                  <span
+                    class="font-mono text-[0.6875rem] text-muted-foreground"
+                    x-text="cmd.keys.join(' / ')"
+                  ></span>
+                </button>
               </li>
             </template>
+            <li
+              x-show="paletteResults().length === 0"
+              class="px-3 py-2 text-[0.8125rem] text-muted-foreground"
+            >
+              No matching command.
+            </li>
           </ul>
-
-          <p
-            class="mt-4 text-[0.75rem]"
-            x-show="!busy && probes.length"
-            :style="allPassed ? 'color: var(--success)' : 'color: var(--destructive)'"
-            x-text="allPassed
-              ? 'All core probes passed on this host.'
-              : 'At least one probe did not pass — see detail above.'"
-          ></p>
-        </section>
-
-        <footer>
-          <button class="btn" type="button" @click="run()" :disabled="busy">
-            <span x-text="busy ? 'Running…' : 'Re-run probes'"></span>
-          </button>
-        </footer>
-      </section>
-
-      <p class="mt-6 text-[0.6875rem] text-muted-foreground">
-        Keymap harness and the WASM/OPFS probe live in
-        <span class="font-mono">spikes/</span> — see
-        <span class="font-mono">spikes/README.md</span>.
-      </p>
+        </div>
+      </div>
     </main>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

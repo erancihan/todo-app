@@ -59,49 +59,19 @@ pub enum Op {
 }
 
 /// CRDT updates are raw bytes but the op log is JSON on the wire, so they travel
-/// base64-encoded.
+/// base64-encoded. Shares the encoder with the projection's `body_state` column
+/// ([`crate::b64`]) — two encoders would be two chances to corrupt a body.
 mod base64_bytes {
     use serde::{Deserialize, Deserializer, Serializer};
 
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
     pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
-        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-        for chunk in bytes.chunks(3) {
-            let b = [
-                chunk[0],
-                *chunk.get(1).unwrap_or(&0),
-                *chunk.get(2).unwrap_or(&0),
-            ];
-            let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
-            for i in 0..4 {
-                if i <= chunk.len() {
-                    out.push(ALPHABET[((n >> (18 - 6 * i)) & 0x3F) as usize] as char);
-                } else {
-                    out.push('=');
-                }
-            }
-        }
-        s.serialize_str(&out)
+        s.serialize_str(&crate::b64::encode(bytes))
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
         let text = String::deserialize(d)?;
-        let mut out = Vec::with_capacity(text.len() / 4 * 3);
-        let mut buffer = 0u32;
-        let mut bits = 0u32;
-        for c in text.bytes().filter(|c| *c != b'=') {
-            let Some(v) = ALPHABET.iter().position(|a| *a == c) else {
-                return Err(serde::de::Error::custom("invalid base64 in body update"));
-            };
-            buffer = buffer << 6 | v as u32;
-            bits += 6;
-            if bits >= 8 {
-                bits -= 8;
-                out.push((buffer >> bits) as u8);
-            }
-        }
-        Ok(out)
+        crate::b64::decode(&text)
+            .map_err(|_| serde::de::Error::custom("invalid base64 in body update"))
     }
 }
 

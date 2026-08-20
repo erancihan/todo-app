@@ -1,178 +1,364 @@
 //! The SQLite projection, and the one seam where the native and wasm32 builds
 //! differ (docs/02-architecture.md §3).
 //!
-//! SQLite is a **deterministic projection** of the op log, never a primary. It is
-//! queried, not authored, and is rebuildable from scratch.
+//! SQLite is a **deterministic projection**, never a primary. It is queried, not
+//! authored, and is rebuildable from the log.
+//!
+//! # Why this trait is deliberately tiny
+//!
+//! [`Store`] executes SQL and returns rows. That is all it does. It makes no
+//! decisions, owns no schema knowledge, and has no idea what a NODE is.
+//!
+//! Everything that *thinks* — ordering, promotion, the event log, tree invariants —
+//! lives above it in [`crate::engine`], written once and shared verbatim by both
+//! targets. Widening this trait is how the two builds would drift into two
+//! implementations of the same logic, so it stays narrow on purpose:
 //!
 //! * **native** — [`SqliteStore`] over `rusqlite`, inside the Tauri shell.
-//! * **wasm32** — the browser PWA implements [`Store`] against `sqlite-wasm` +
-//!   OPFS in the host JS environment. `rusqlite` is not in the wasm dependency
-//!   graph at all.
-//!
-//! Both run the *same* [`SCHEMA_SQL`], which is what makes the split a port rather
-//! than a fork.
-//!
-//! **Phase 0 scope:** enough schema and API for the WASM spike to prove a real
-//! write/read round-trip. The full projection lands in Phase 1.
+//! * **wasm32** — `JsStore` (see [`crate::wasm`]) forwarding to `sqlite-wasm` +
+//!   OPFS in the host JS environment. `rusqlite` never enters the wasm graph.
+
+use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
-/// The projection schema. Deliberately a plain `&str` so the wasm build can hand
-/// it to `sqlite-wasm` verbatim.
+/// A SQLite scalar, in the narrow set the projection actually uses.
 ///
-/// Every table is account-scoped from day one (`account_id`) — multi-host is
-/// additive rather than a migration (roadmap Phase 1 exit criterion).
+/// No `Blob` variant: image bytes live outside the projection entirely
+/// (docs/02-architecture.md ADR-003), and the one binary value that *is* stored —
+/// a body's CRDT state — travels as base64 `Text` so the JS side needs no special
+/// handling. Adding `Blob` here would mean binary marshalling across the wasm
+/// boundary for no current caller.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SqlValue {
+    Null,
+    Int(i64),
+    Real(f64),
+    Text(String),
+}
+
+impl SqlValue {
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            SqlValue::Text(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            SqlValue::Int(i) => Some(*i),
+            SqlValue::Real(f) => Some(*f as i64),
+            _ => None,
+        }
+    }
+
+    /// Text, or empty when NULL — the common case for projected columns that are
+    /// `NOT NULL DEFAULT ''` but arrive through a LEFT JOIN.
+    pub fn text_or_default(&self) -> String {
+        self.as_str().unwrap_or_default().to_owned()
+    }
+
+    pub fn is_null(&self) -> bool {
+        matches!(self, SqlValue::Null)
+    }
+
+    pub fn as_bool(&self) -> bool {
+        self.as_i64().is_some_and(|i| i != 0)
+    }
+}
+
+impl From<&str> for SqlValue {
+    fn from(s: &str) -> Self {
+        SqlValue::Text(s.to_owned())
+    }
+}
+impl From<String> for SqlValue {
+    fn from(s: String) -> Self {
+        SqlValue::Text(s)
+    }
+}
+impl From<i64> for SqlValue {
+    fn from(i: i64) -> Self {
+        SqlValue::Int(i)
+    }
+}
+impl From<bool> for SqlValue {
+    fn from(b: bool) -> Self {
+        SqlValue::Int(b as i64)
+    }
+}
+impl<T: Into<SqlValue>> From<Option<T>> for SqlValue {
+    fn from(v: Option<T>) -> Self {
+        v.map_or(SqlValue::Null, Into::into)
+    }
+}
+
+/// One result row, in the column order the query asked for.
+pub type Row = Vec<SqlValue>;
+
+/// The storage half of the engine port. Two implementations, one contract.
+pub trait Store {
+    /// Run one statement. Returns rows affected.
+    fn execute(&self, sql: &str, params: &[SqlValue]) -> Result<u64>;
+
+    /// Run several statements with no parameters — schema setup and migrations.
+    fn execute_batch(&self, sql: &str) -> Result<()>;
+
+    /// Run one query.
+    fn query(&self, sql: &str, params: &[SqlValue]) -> Result<Vec<Row>>;
+}
+
+/// Convenience helpers, provided for every [`Store`].
+pub trait StoreExt: Store {
+    /// Apply the projection schema. Idempotent — safe on every boot.
+    fn init_schema(&self) -> Result<()> {
+        self.execute_batch(SCHEMA_SQL)
+    }
+
+    /// First row of a query, if any.
+    fn query_one(&self, sql: &str, params: &[SqlValue]) -> Result<Option<Row>> {
+        Ok(self.query(sql, params)?.into_iter().next())
+    }
+
+    /// First column of the first row as an integer.
+    fn query_i64(&self, sql: &str, params: &[SqlValue]) -> Result<Option<i64>> {
+        Ok(self
+            .query_one(sql, params)?
+            .and_then(|r| r.first().and_then(SqlValue::as_i64)))
+    }
+
+    /// Run `f` inside a transaction, rolling back if it fails.
+    ///
+    /// Every engine mutation goes through this: a state change and the EVENT it
+    /// emits must land together or not at all, or the log stops being a faithful
+    /// record of what happened.
+    fn transaction<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.execute("BEGIN IMMEDIATE", &[])?;
+        match f() {
+            Ok(value) => {
+                self.execute("COMMIT", &[])?;
+                Ok(value)
+            }
+            Err(e) => {
+                // Best-effort: if the rollback itself fails the original error is
+                // still the more useful one to surface.
+                let _ = self.execute("ROLLBACK", &[]);
+                Err(e)
+            }
+        }
+    }
+}
+
+impl<S: Store + ?Sized> StoreExt for S {}
+
+/// The projection schema.
+///
+/// Every table is account-scoped from day one (roadmap Phase 1 exit criterion:
+/// "store keys are account-scoped so a second account would slot in without
+/// migration"). It is a plain `&str` so the wasm build hands it to `sqlite-wasm`
+/// verbatim — one schema, two drivers, no chance of drift.
 pub const SCHEMA_SQL: &str = r#"
+PRAGMA foreign_keys = ON;
+
+-- The single NODE table: a todo and a promoted sub-item are the same row.
 CREATE TABLE IF NOT EXISTS node (
-  account_id   TEXT NOT NULL,
-  id           TEXT NOT NULL,
+  account_id   TEXT    NOT NULL,
+  id           TEXT    NOT NULL,
   parent_id    TEXT,
-  kind         TEXT NOT NULL DEFAULT 'task',
+  kind         TEXT    NOT NULL DEFAULT 'task',
   promoted     INTEGER NOT NULL DEFAULT 0,
-  title        TEXT NOT NULL DEFAULT '',
-  body_md      TEXT NOT NULL DEFAULT '',
-  status       TEXT NOT NULL DEFAULT 'inbox',
-  order_key    TEXT NOT NULL,
+  title        TEXT    NOT NULL DEFAULT '',
+  body_md      TEXT    NOT NULL DEFAULT '',
+  -- The body's Y.Text document, base64-encoded. Kept alongside the materialized
+  -- markdown so Phase 2 sync has real CRDT state to merge rather than a string
+  -- it would have to guess the history of.
+  body_state   TEXT    NOT NULL DEFAULT '',
+  status       TEXT    NOT NULL DEFAULT 'inbox',
+  order_key    TEXT    NOT NULL,
   created_at   INTEGER NOT NULL DEFAULT 0,
   updated_at   INTEGER NOT NULL DEFAULT 0,
   due_at       INTEGER,
   completed_at INTEGER,
+  collapsed    INTEGER NOT NULL DEFAULT 0,
   deleted      INTEGER NOT NULL DEFAULT 0,
   deleted_at   INTEGER,
-  hlc          TEXT NOT NULL DEFAULT '',
+  hlc          TEXT    NOT NULL DEFAULT '',
   PRIMARY KEY (account_id, id)
 );
-CREATE INDEX IF NOT EXISTS node_by_parent ON node (account_id, parent_id, order_key);
+-- The list query is "children of P, in order" — this index is that query.
+CREATE INDEX IF NOT EXISTS node_by_parent
+  ON node (account_id, parent_id, order_key);
 
+-- The append-only EVENT log. Immutable: the report's source of truth.
 CREATE TABLE IF NOT EXISTS event (
-  account_id  TEXT NOT NULL,
-  id          TEXT NOT NULL,
-  node_id     TEXT NOT NULL,
-  actor_id    TEXT NOT NULL,
-  type        TEXT NOT NULL,
+  account_id  TEXT    NOT NULL,
+  id          TEXT    NOT NULL,
+  node_id     TEXT    NOT NULL,
+  actor_id    TEXT    NOT NULL,
+  type        TEXT    NOT NULL,
   from_value  TEXT,
   to_value    TEXT,
-  occurred_at TEXT NOT NULL,
+  occurred_at TEXT    NOT NULL,
+  occurred_ms INTEGER NOT NULL DEFAULT 0,
   payload     TEXT,
   PRIMARY KEY (account_id, id)
 );
-CREATE INDEX IF NOT EXISTS event_by_time ON event (account_id, occurred_at);
+-- The EOD report is a range scan over this.
+CREATE INDEX IF NOT EXISTS event_by_time ON event (account_id, occurred_ms);
+CREATE INDEX IF NOT EXISTS event_by_node ON event (account_id, node_id);
+
+-- Axis 1: Collections — named, nestable, the future unit of sharing.
+CREATE TABLE IF NOT EXISTS collection (
+  account_id TEXT    NOT NULL,
+  id         TEXT    NOT NULL,
+  name       TEXT    NOT NULL,
+  parent_id  TEXT,
+  owner_id   TEXT    NOT NULL DEFAULT '',
+  color      TEXT    NOT NULL DEFAULT '',
+  icon       TEXT    NOT NULL DEFAULT '',
+  order_key  TEXT    NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL DEFAULT 0,
+  tombstone  INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (account_id, id)
+);
+
+-- Many-to-many, tombstoned: a node lives in zero or more Collections.
+CREATE TABLE IF NOT EXISTS node_collection (
+  account_id    TEXT    NOT NULL,
+  node_id       TEXT    NOT NULL,
+  collection_id TEXT    NOT NULL,
+  order_key     TEXT    NOT NULL DEFAULT '',
+  tombstone     INTEGER NOT NULL DEFAULT 0,
+  hlc           TEXT    NOT NULL DEFAULT '',
+  PRIMARY KEY (account_id, node_id, collection_id)
+);
+CREATE INDEX IF NOT EXISTS node_collection_by_collection
+  ON node_collection (account_id, collection_id, tombstone);
+
+-- Axis 2: Tags — flat, cross-cutting personal labels.
+CREATE TABLE IF NOT EXISTS tag (
+  account_id TEXT    NOT NULL,
+  id         TEXT    NOT NULL,
+  name       TEXT    NOT NULL,
+  color      TEXT    NOT NULL DEFAULT '',
+  deleted    INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (account_id, id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS tag_by_name ON tag (account_id, name);
+
+CREATE TABLE IF NOT EXISTS node_tag (
+  account_id TEXT    NOT NULL,
+  node_id    TEXT    NOT NULL,
+  tag_id     TEXT    NOT NULL,
+  added_at   INTEGER NOT NULL DEFAULT 0,
+  deleted    INTEGER NOT NULL DEFAULT 0,
+  hlc        TEXT    NOT NULL DEFAULT '',
+  PRIMARY KEY (account_id, node_id, tag_id)
+);
+CREATE INDEX IF NOT EXISTS node_tag_by_tag ON node_tag (account_id, tag_id, deleted);
 "#;
-
-/// One projected NODE row, in the narrow shape Phase 0 needs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NodeRow {
-    pub id: String,
-    pub title: String,
-    pub body_md: String,
-    pub order_key: String,
-    pub hlc: String,
-}
-
-/// The engine port's storage half. Implemented by `rusqlite` natively and by
-/// `sqlite-wasm` + OPFS in the browser.
-pub trait Store {
-    /// Idempotent — safe on every boot.
-    fn init_schema(&mut self) -> Result<()>;
-
-    /// Insert or overwrite a projected node row.
-    fn upsert_node(&mut self, account_id: &str, row: &NodeRow) -> Result<()>;
-
-    fn load_node(&self, account_id: &str, id: &str) -> Result<Option<NodeRow>>;
-
-    /// Live (non-tombstoned) node count for one account. Proves partitioning:
-    /// another account's rows must never be counted here.
-    fn count_nodes(&self, account_id: &str) -> Result<u64>;
-}
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use super::*;
     use crate::CoreError;
+    use std::cell::RefCell;
 
     fn map_err(e: rusqlite::Error) -> CoreError {
         CoreError::Store(e.to_string())
     }
 
+    impl rusqlite::ToSql for SqlValue {
+        fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+            use rusqlite::types::{ToSqlOutput, Value, ValueRef};
+            Ok(match self {
+                SqlValue::Null => ToSqlOutput::Borrowed(ValueRef::Null),
+                SqlValue::Int(i) => ToSqlOutput::Owned(Value::Integer(*i)),
+                SqlValue::Real(f) => ToSqlOutput::Owned(Value::Real(*f)),
+                SqlValue::Text(s) => ToSqlOutput::Borrowed(ValueRef::Text(s.as_bytes())),
+            })
+        }
+    }
+
     /// The native projection, used by the Tauri shell.
+    ///
+    /// `RefCell` rather than `&mut self`: the [`Store`] contract is `&self` so the
+    /// wasm side can hold a JS callback, and `rusqlite::Connection` only needs
+    /// `&self` for both execute and query anyway.
     pub struct SqliteStore {
-        conn: rusqlite::Connection,
+        conn: RefCell<rusqlite::Connection>,
     }
 
     impl SqliteStore {
         /// Open (or create) the projection at `path`.
         pub fn open(path: &std::path::Path) -> Result<Self> {
             let conn = rusqlite::Connection::open(path).map_err(map_err)?;
-            Ok(Self { conn })
+            // WAL survives an unclean shutdown without losing committed work —
+            // the Phase 1 criterion is "killing and relaunching loses nothing".
+            conn.pragma_update(None, "journal_mode", "WAL")
+                .map_err(map_err)?;
+            conn.pragma_update(None, "synchronous", "NORMAL")
+                .map_err(map_err)?;
+            conn.pragma_update(None, "foreign_keys", "ON")
+                .map_err(map_err)?;
+            Ok(Self {
+                conn: RefCell::new(conn),
+            })
         }
 
-        /// An in-memory projection — used by tests and by "rebuild from the op
-        /// log" flows.
+        /// An in-memory projection — tests, and "rebuild from the log" flows.
         pub fn in_memory() -> Result<Self> {
             let conn = rusqlite::Connection::open_in_memory().map_err(map_err)?;
-            Ok(Self { conn })
+            Ok(Self {
+                conn: RefCell::new(conn),
+            })
         }
     }
 
     impl Store for SqliteStore {
-        fn init_schema(&mut self) -> Result<()> {
-            self.conn.execute_batch(SCHEMA_SQL).map_err(map_err)
+        fn execute(&self, sql: &str, params: &[SqlValue]) -> Result<u64> {
+            let conn = self.conn.borrow();
+            let mut stmt = conn.prepare_cached(sql).map_err(map_err)?;
+            let n = stmt
+                .execute(rusqlite::params_from_iter(params.iter()))
+                .map_err(map_err)?;
+            Ok(n as u64)
         }
 
-        fn upsert_node(&mut self, account_id: &str, row: &NodeRow) -> Result<()> {
-            self.conn
-                .execute(
-                    "INSERT INTO node (account_id, id, title, body_md, order_key, hlc)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                     ON CONFLICT (account_id, id) DO UPDATE SET
-                       title = excluded.title,
-                       body_md = excluded.body_md,
-                       order_key = excluded.order_key,
-                       hlc = excluded.hlc",
-                    rusqlite::params![
-                        account_id,
-                        row.id,
-                        row.title,
-                        row.body_md,
-                        row.order_key,
-                        row.hlc
-                    ],
-                )
-                .map(|_| ())
-                .map_err(map_err)
+        fn execute_batch(&self, sql: &str) -> Result<()> {
+            self.conn.borrow().execute_batch(sql).map_err(map_err)
         }
 
-        fn load_node(&self, account_id: &str, id: &str) -> Result<Option<NodeRow>> {
-            self.conn
-                .query_row(
-                    "SELECT id, title, body_md, order_key, hlc
-                     FROM node WHERE account_id = ?1 AND id = ?2",
-                    rusqlite::params![account_id, id],
-                    |r| {
-                        Ok(NodeRow {
-                            id: r.get(0)?,
-                            title: r.get(1)?,
-                            body_md: r.get(2)?,
-                            order_key: r.get(3)?,
-                            hlc: r.get(4)?,
-                        })
-                    },
-                )
-                .map(Some)
-                .or_else(|e| match e {
-                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                    other => Err(map_err(other)),
+        fn query(&self, sql: &str, params: &[SqlValue]) -> Result<Vec<Row>> {
+            let conn = self.conn.borrow();
+            let mut stmt = conn.prepare_cached(sql).map_err(map_err)?;
+            let column_count = stmt.column_count();
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(params.iter()), |r| {
+                    let mut row: Row = Vec::with_capacity(column_count);
+                    for i in 0..column_count {
+                        row.push(match r.get_ref(i)? {
+                            rusqlite::types::ValueRef::Null => SqlValue::Null,
+                            rusqlite::types::ValueRef::Integer(v) => SqlValue::Int(v),
+                            rusqlite::types::ValueRef::Real(v) => SqlValue::Real(v),
+                            rusqlite::types::ValueRef::Text(v) => {
+                                SqlValue::Text(String::from_utf8_lossy(v).into_owned())
+                            }
+                            // Not produced by our schema, but a hand-run query or a
+                            // future migration could; degrade rather than panic.
+                            rusqlite::types::ValueRef::Blob(v) => {
+                                SqlValue::Text(String::from_utf8_lossy(v).into_owned())
+                            }
+                        });
+                    }
+                    Ok(row)
                 })
-        }
+                .map_err(map_err)?;
 
-        fn count_nodes(&self, account_id: &str) -> Result<u64> {
-            self.conn
-                .query_row(
-                    "SELECT COUNT(*) FROM node WHERE account_id = ?1 AND deleted = 0",
-                    rusqlite::params![account_id],
-                    |r| r.get::<_, i64>(0),
-                )
-                .map(|n| n as u64)
+            rows.collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(map_err)
         }
     }
@@ -186,85 +372,105 @@ mod tests {
     use super::*;
 
     fn store() -> SqliteStore {
-        let mut s = SqliteStore::in_memory().unwrap();
+        let s = SqliteStore::in_memory().unwrap();
         s.init_schema().unwrap();
         s
     }
 
-    fn row(id: &str) -> NodeRow {
-        NodeRow {
-            id: id.into(),
-            title: "Ship EOD report".into(),
-            body_md: "## Goal\nmarkdown body".into(),
-            order_key: "V-dev-a".into(),
-            hlc: "0000000000000001-00000000-dev-a".into(),
-        }
-    }
-
     #[test]
     fn schema_init_is_idempotent() {
-        let mut s = store();
+        let s = store();
         s.init_schema().unwrap();
         s.init_schema().unwrap();
     }
 
     #[test]
-    fn a_node_round_trips_through_the_projection() {
-        let mut s = store();
-        let r = row("node-1");
-        s.upsert_node("acct-a", &r).unwrap();
-        assert_eq!(s.load_node("acct-a", "node-1").unwrap(), Some(r));
+    fn values_round_trip_through_the_port() {
+        let s = store();
+        s.execute(
+            "INSERT INTO node (account_id, id, title, order_key, due_at) VALUES (?, ?, ?, ?, ?)",
+            &[
+                "acct".into(),
+                "n1".into(),
+                "hello".into(),
+                "V-dev".into(),
+                SqlValue::Null,
+            ],
+        )
+        .unwrap();
+
+        let rows = s
+            .query(
+                "SELECT title, promoted, due_at FROM node WHERE account_id = ? AND id = ?",
+                &["acct".into(), "n1".into()],
+            )
+            .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], SqlValue::Text("hello".into()));
+        assert_eq!(rows[0][1], SqlValue::Int(0));
+        assert!(rows[0][2].is_null());
     }
 
     #[test]
-    fn upsert_overwrites_rather_than_duplicating() {
-        let mut s = store();
-        s.upsert_node("acct-a", &row("node-1")).unwrap();
-        let mut updated = row("node-1");
-        updated.title = "Renamed".into();
-        s.upsert_node("acct-a", &updated).unwrap();
+    fn a_failing_transaction_rolls_back() {
+        // The event log must never record a change the projection did not make.
+        let s = store();
+        let result: Result<()> = s.transaction(|| {
+            s.execute(
+                "INSERT INTO node (account_id, id, title, order_key) VALUES (?, ?, ?, ?)",
+                &["acct".into(), "n1".into(), "x".into(), "V-dev".into()],
+            )?;
+            Err(crate::CoreError::Store("deliberate failure".into()))
+        });
 
-        assert_eq!(s.count_nodes("acct-a").unwrap(), 1);
+        assert!(result.is_err());
         assert_eq!(
-            s.load_node("acct-a", "node-1").unwrap().unwrap().title,
-            "Renamed"
+            s.query_i64("SELECT COUNT(*) FROM node", &[]).unwrap(),
+            Some(0),
+            "the failed transaction left a row behind"
         );
     }
 
     #[test]
-    fn accounts_are_partitioned() {
-        // Roadmap Phase 1 exit criterion, enforced from the first schema: one
-        // account's rows must be invisible to another.
-        let mut s = store();
-        s.upsert_node("acct-a", &row("node-1")).unwrap();
-        s.upsert_node("acct-b", &row("node-2")).unwrap();
-
-        assert_eq!(s.count_nodes("acct-a").unwrap(), 1);
-        assert_eq!(s.count_nodes("acct-b").unwrap(), 1);
-        assert_eq!(s.load_node("acct-b", "node-1").unwrap(), None);
+    fn a_committed_transaction_persists() {
+        let s = store();
+        s.transaction(|| {
+            s.execute(
+                "INSERT INTO node (account_id, id, title, order_key) VALUES (?, ?, ?, ?)",
+                &["acct".into(), "n1".into(), "x".into(), "V-dev".into()],
+            )
+        })
+        .unwrap();
+        assert_eq!(
+            s.query_i64("SELECT COUNT(*) FROM node", &[]).unwrap(),
+            Some(1)
+        );
     }
 
     #[test]
     fn the_same_id_can_exist_under_two_accounts() {
-        let mut s = store();
-        s.upsert_node("acct-a", &row("shared-id")).unwrap();
-        let mut other = row("shared-id");
-        other.title = "Different account".into();
-        s.upsert_node("acct-b", &other).unwrap();
-
-        assert_eq!(
-            s.load_node("acct-a", "shared-id").unwrap().unwrap().title,
-            "Ship EOD report"
-        );
-        assert_eq!(
-            s.load_node("acct-b", "shared-id").unwrap().unwrap().title,
-            "Different account"
-        );
-    }
-
-    #[test]
-    fn missing_rows_are_none_not_an_error() {
+        // Partitioning is by composite key, so ids never need to be globally
+        // unique across hosts — which is what makes multi-host additive.
         let s = store();
-        assert_eq!(s.load_node("acct-a", "nope").unwrap(), None);
+        for account in ["acct-a", "acct-b"] {
+            s.execute(
+                "INSERT INTO node (account_id, id, title, order_key) VALUES (?, ?, ?, ?)",
+                &[
+                    account.into(),
+                    "shared".into(),
+                    account.into(),
+                    "V-dev".into(),
+                ],
+            )
+            .unwrap();
+        }
+        let rows = s
+            .query(
+                "SELECT title FROM node WHERE account_id = ? AND id = ?",
+                &["acct-b".into(), "shared".into()],
+            )
+            .unwrap();
+        assert_eq!(rows[0][0], SqlValue::Text("acct-b".into()));
     }
 }
