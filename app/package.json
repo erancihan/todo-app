@@ -20,6 +20,7 @@
   "dependencies": {
     "@codemirror/commands": "6.10.4",
     "@codemirror/lang-markdown": "6.5.1",
+    "@codemirror/language": "6.12.4",
     "@codemirror/state": "6.7.1",
     "@codemirror/view": "6.43.7",
     "@sqlite.org/sqlite-wasm": "3.53.0-build1",

@@ -118,9 +118,27 @@ try {
 
   // --- LIST mode verbs ----------------------------------------------------
   await page.keyboard.press("Escape");
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(1000);
   const mode = await page.locator("[data-mode-pill]").textContent();
   check("Esc returns to LIST mode", mode === "LIST", `mode = ${mode}`);
+
+  // Exactly two captures should leave exactly two rows. This is the check that
+  // catches double-dispatch (Ctrl+Enter handled by both CodeMirror and the
+  // window listener produced a spare blank row every time) and abandoned
+  // capture rows.
+  const rowsAfterCapture = await page.locator("li[role=treeitem]").count();
+  check(
+    "two captures leave exactly two rows",
+    rowsAfterCapture === 2,
+    `${rowsAfterCapture} rows — expected 2, extras are blank capture rows`,
+  );
+
+  const titles = await page.locator("li[role=treeitem] span.truncate").allTextContents();
+  check(
+    "the row title is derived without markdown syntax",
+    titles[0] === "Ship EOD report v1",
+    `got ${JSON.stringify(titles)}`,
+  );
 
   // `x` toggles done on the focused row.
   await page.keyboard.press("k");
@@ -130,6 +148,42 @@ try {
   await page.waitForTimeout(700);
   const doneCount = await page.locator("li .line-through").count();
   check("x toggles done", doneCount >= 1, `${doneCount} struck-through rows`);
+
+  // `t` opens the tag editor and applies a tag.
+  await page.keyboard.press("t");
+  await page.waitForTimeout(400);
+  await page.keyboard.type("urgent");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(900);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(400);
+  const tagCount = await page.locator("li [class*='tag-']").count();
+  check("t applies a tag", tagCount > 0, `${tagCount} chips`);
+
+  // `d d` deletes, `u` puts it back — the two-key sequence and undo together.
+  const beforeDelete = await page.locator("li[role=treeitem]").count();
+  await page.keyboard.press("d");
+  await page.keyboard.press("d");
+  await page.waitForTimeout(900);
+  const afterDelete = await page.locator("li[role=treeitem]").count();
+  check("dd deletes the focused row", afterDelete === beforeDelete - 1, `${beforeDelete} → ${afterDelete}`);
+
+  await page.keyboard.press("u");
+  await page.waitForTimeout(900);
+  const afterUndo = await page.locator("li[role=treeitem]").count();
+  check("u restores it", afterUndo === beforeDelete, `${afterDelete} → ${afterUndo}`);
+
+  // `/` filters.
+  await page.keyboard.press("/");
+  await page.waitForTimeout(400);
+  // "todo" appears only in the second row's title. ("Second" would match both,
+  // because the first row's body contains the line "second line".)
+  await page.keyboard.type("todo");
+  await page.waitForTimeout(600);
+  const filtered = await page.locator("li[role=treeitem]").count();
+  check("/ filters the list", filtered === 1, `${filtered} rows visible`);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(500);
 
   // `?` opens the cheat sheet, Escape closes it.
   await page.keyboard.press("?");

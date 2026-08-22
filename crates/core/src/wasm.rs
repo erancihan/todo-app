@@ -223,6 +223,15 @@ impl DaybookEngine {
         self.inner.borrow().promote(&id).map_err(err)
     }
 
+    pub fn demote(&self, id: String) -> std::result::Result<(), JsValue> {
+        self.inner.borrow().demote(&id).map_err(err)
+    }
+
+    #[wasm_bindgen(js_name = restoreNode)]
+    pub fn restore_node(&self, id: String) -> std::result::Result<usize, JsValue> {
+        self.inner.borrow().restore_node(&id).map_err(err)
+    }
+
     pub fn indent(&self, id: String) -> std::result::Result<(), JsValue> {
         self.inner.borrow().indent(&id).map_err(err)
     }

@@ -23,11 +23,31 @@ interface AppComponent {
   rows(): NodeView[];
   isFocused(id: string): boolean;
   isEditing(id: string): boolean;
+  preview(node: NodeView): string;
   onRowClick(id: string, event: MouseEvent): void;
   toggleDone(node: NodeView, event: Event): void;
   paletteResults(): typeof PALETTE_COMMANDS;
   runCommand(id: string): void;
   cheatSheet: typeof CHEAT_SHEET;
+  // -- tags / collections / search
+  tagDraft: string;
+  collectionDraft: string;
+  /**
+   * The focused node, mirrored as a reactive property.
+   *
+   * NOT a method reading the controller: Alpine only re-renders when one of
+   * *its* reactive values changes, and a method that reaches into plain
+   * controller state has no dependency for Alpine to track. That is why the tag
+   * overlay's heading rendered "Untitled" and then never updated.
+   */
+  focused: NodeView | null;
+  submitTag(): void;
+  dropTag(tagId: string): void;
+  toggleCollection(collectionId: string): void;
+  submitCollection(): void;
+  inCollection(collectionId: string): boolean;
+  onQuery(value: string): void;
+  closeOverlays(): void;
 }
 
 Alpine.data("daybook", (): AppComponent => {
@@ -79,11 +99,23 @@ Alpine.data("daybook", (): AppComponent => {
       error: null,
       cheatSheetOpen: false,
       paletteOpen: false,
+      tagEditorOpen: false,
+      collectionPickerOpen: false,
+      query: "",
+      searchOpen: false,
+      allTags: [],
+      allCollections: [],
+      pendingKey: null,
+      canUndo: false,
+      canRedo: false,
     },
     visible: [],
     runtime: "…",
     paletteQuery: "",
     cheatSheet: CHEAT_SHEET,
+    tagDraft: "",
+    collectionDraft: "",
+    focused: null,
 
     init() {
       controller = new ListController(port, {
@@ -102,12 +134,27 @@ Alpine.data("daybook", (): AppComponent => {
       controller.subscribe((state) => {
         this.state = state;
         this.visible = controller.visible;
+        this.focused = controller.focusedNode;
       });
 
       // One listener for the whole app: the controller decides what a key means
       // based on mode, so there is no per-element key wiring to keep in sync.
       window.addEventListener("keydown", (event) => {
-        if (this.state.paletteOpen && event.key !== "Escape") return;
+        const target = event.target as HTMLElement | null;
+
+        // CodeMirror owns every key inside itself. It already binds Enter,
+        // Ctrl/Cmd+Enter, Tab and Escape, so letting this listener also see them
+        // dispatches each one TWICE — which made every submit create two rows,
+        // one of them blank. Note the editor is a contenteditable div, not an
+        // INPUT, so the check below would not have caught it.
+        if (target?.closest(".cm-editor")) return;
+
+        // Overlay inputs: LIST verbs must not fire while typing a tag name —
+        // the `t` in "later" is a letter, not "open the tag editor". Escape
+        // still gets through so there is always a way out.
+        const typing = target?.tagName === "INPUT" || target?.tagName === "TEXTAREA";
+        if (typing && event.key !== "Escape") return;
+
         controller.handleKey(event);
       });
 
@@ -127,6 +174,18 @@ Alpine.data("daybook", (): AppComponent => {
     },
     isEditing(id) {
       return this.state.mode === "edit" && this.state.focusedId === id;
+    },
+    preview(node) {
+      // Everything after the line the title was derived from, flattened to one
+      // line. Showing the title line again would just duplicate the row heading.
+      const lines = node.bodyMd.split("\n");
+      const titleLine = lines.findIndex((l) => l.trim() !== "");
+      if (titleLine === -1) return "";
+      return lines
+        .slice(titleLine + 1)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
     },
     onRowClick(id, event) {
       // A click landing inside the editor is the user placing their caret, not a
@@ -153,6 +212,41 @@ Alpine.data("daybook", (): AppComponent => {
       this.paletteQuery = "";
       controller.closeOverlays();
       void controller.dispatch(id as Parameters<ListController["dispatch"]>[0]);
+    },
+
+    // -- tags / collections / search ---------------------------------------
+
+    submitTag() {
+      const name = this.tagDraft.trim();
+      const node = controller.focusedNode;
+      if (!name || !node) return;
+      this.tagDraft = "";
+      void controller.addTag(node.id, name);
+    },
+    dropTag(tagId) {
+      const node = controller.focusedNode;
+      if (node) void controller.removeTag(node.id, tagId);
+    },
+    toggleCollection(collectionId) {
+      const node = controller.focusedNode;
+      if (node) void controller.toggleCollection(node.id, collectionId);
+    },
+    submitCollection() {
+      const name = this.collectionDraft.trim();
+      if (!name) return;
+      this.collectionDraft = "";
+      void controller.createCollection(name, controller.focusedNode?.id);
+    },
+    inCollection(collectionId) {
+      // Reads the reactive mirror, not the controller, so the checkboxes update
+      // when membership changes rather than only when the collection list does.
+      return this.focused?.collectionIds.includes(collectionId) ?? false;
+    },
+    onQuery(value) {
+      controller.setQuery(value);
+    },
+    closeOverlays() {
+      controller.closeOverlays();
     },
   };
 });

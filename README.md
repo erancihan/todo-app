@@ -5,7 +5,7 @@
 **Status: Phase 1 — MVP core (in progress).** The planning docs below lock the product, stack, data model, UX, and roadmap.
 
 - **Phase 0 (proof-of-stack)** — partly green. The CRDT, browser/WASM, keymap, and desktop-shell criteria pass; the **iOS/Android criteria are outstanding** because they need a Mac and real devices. See [`spikes/README.md`](spikes/README.md) and the run book in [`spikes/mobile-README.md`](spikes/mobile-README.md).
-- **Phase 1 (MVP core)** — the capture loop, single-table NODE model, event log, ordering, promotion, tags, and collections are implemented and run on **the browser and the Linux desktop**. Windows, macOS, iOS, and Android are untested here and are the owner's next targets.
+- **Phase 1 (MVP core)** — the capture loop, single-table NODE model, event log, ordering, promotion, tags, collections, search, undo/redo, and Obsidian-style inline live preview are implemented and run on **the browser and the Linux desktop**. Windows, macOS, iOS, and Android are untested here and are the owner's next targets.
 
 ---
 
@@ -105,11 +105,12 @@ macOS or iOS will render.
 
 ### Known deviations from the docs
 
-Both are flagged here rather than silently applied, and both are load-bearing:
+Flagged here rather than silently applied:
 
 | Doc | Deviation | Why |
 | --- | --- | --- |
 | [03 §5.3](docs/03-data-model.md) | `order_key` jitter separator is **`-`**, not `:` | `:` (ASCII 58) sorts *above* digits `0`-`9`, so `"V:dev" > "V7:dev"` and sibling order inverts under SQLite's `ORDER BY`. `-` (45) sorts below all 62 base62 digits. Base62 itself is unchanged. Locked by a test over the whole alphabet. |
+| [03 §3.1](docs/03-data-model.md) | `title` is **derived** from the body's first line | The data model has `title` and `body_md` as separate fields, but [04 §1](docs/04-ux-and-interaction.md) demands zero-ceremony capture with no title field to fill in. So the engine derives `title` from the body's first meaningful line and strips the leading markdown, which is what list rows and report bullets show. It stays an independent LWW field: a title set explicitly is never overwritten by a later body edit. |
 | [02 §3](docs/02-architecture.md) | **Linux desktop** is a working develop-and-run target | The docs drop native Linux (the browser build covers it). It is not in the shipping matrix and is not packaged; it exists because it is what the current dev machine runs. WebKitGTK ≠ WKWebView, so a green Linux run says nothing about iOS/macOS. |
 
 ---

@@ -426,7 +426,8 @@ impl<S: Store> Engine<S> {
     /// user actually did, and what a peer needs to merge correctly.
     pub fn set_body(&self, id: &str, markdown: &str) -> Result<()> {
         let Some(row) = self.store.query_one(
-            "SELECT body_md, body_state FROM node WHERE account_id = ? AND id = ? AND deleted = 0",
+            "SELECT body_md, body_state, title FROM node \
+             WHERE account_id = ? AND id = ? AND deleted = 0",
             &[self.account(), id.into()],
         )?
         else {
@@ -437,11 +438,27 @@ impl<S: Store> Engine<S> {
         if current == markdown {
             return Ok(());
         }
+        let previous_title = row[2].text_or_default();
 
         let mut body = load_body(&row[1].text_or_default(), self.body_client_id())?;
         apply_text_change(&mut body, markdown)?;
         let state = b64::encode(body.snapshot()?.as_bytes());
         let text = body.text();
+
+        // Capture is zero-ceremony: the user types prose and never fills in a
+        // title field (docs/04 §1). So the title is *derived* from the body's
+        // first meaningful line — that is what the list row shows and what the
+        // EOD report will use for its bullets.
+        //
+        // `title` is still an independently settable LWW field though, so a title
+        // someone set deliberately must survive later body edits. The test for
+        // "still automatic" is whether the stored title matches what the *old*
+        // body would have derived: if so it was ours to maintain, otherwise
+        // someone set it by hand and we leave it alone.
+        let title_is_derived =
+            previous_title.is_empty() || previous_title == derive_title(&current);
+        let next_title = derive_title(&text);
+        let retitle = title_is_derived && next_title != previous_title;
 
         self.store.transaction(|| {
             self.store.execute(
@@ -453,6 +470,12 @@ impl<S: Store> Engine<S> {
                     id.into(),
                 ],
             )?;
+            if retitle {
+                self.store.execute(
+                    "UPDATE node SET title = ? WHERE account_id = ? AND id = ?",
+                    &[next_title.as_str().into(), self.account(), id.into()],
+                )?;
+            }
             self.touch(id)?;
             // Bodies change constantly while typing; the log records that the body
             // changed, not every keystroke's before/after.
@@ -558,6 +581,81 @@ impl<S: Store> Engine<S> {
             self.touch(id)?;
             self.emit(id, EventType::Promoted, None, None, None)
         })
+    }
+
+    /// Reverse a promotion.
+    ///
+    /// Discouraged in normal use — the data model says the event trail is the
+    /// record and demotion is rare — but undo needs it, and an undo that cannot
+    /// reverse the last action is not undo.
+    pub fn demote(&self, id: &str) -> Result<()> {
+        let Some(node) = self.node(id)? else {
+            return Err(CoreError::Store(format!("no such node: {id}")));
+        };
+        if !node.promoted {
+            return Ok(());
+        }
+        // A node with a parent goes back to being a checklist item; a root node
+        // was always a task and stays one.
+        let kind = if node.parent_id.is_some() {
+            Kind::ChecklistItem
+        } else {
+            Kind::Task
+        };
+        self.store.transaction(|| {
+            self.store.execute(
+                "UPDATE node SET promoted = 0, kind = ? WHERE account_id = ? AND id = ?",
+                &[kind.as_str().into(), self.account(), id.into()],
+            )?;
+            self.touch(id)?;
+            self.emit(
+                id,
+                EventType::Updated,
+                Some("promoted"),
+                None,
+                Some(r#"{"field":"promoted","to":false}"#),
+            )
+        })
+    }
+
+    /// Lift a tombstone, restoring a node and its subtree.
+    ///
+    /// Only safe as the inverse of a *local* delete that has not yet synced:
+    /// once a delete has propagated, a tombstone is terminal by design
+    /// (docs/03-data-model.md §5.4) and resurrecting it would fight the merge
+    /// rules. Phase 2 must gate this on the causal watermark.
+    pub fn restore_node(&self, id: &str) -> Result<usize> {
+        let mut restored = vec![id.to_owned()];
+        let mut cursor = 0;
+        while cursor < restored.len() {
+            let children = self.store.query(
+                "SELECT id FROM node WHERE account_id = ? AND parent_id = ? AND deleted = 1",
+                &[self.account(), restored[cursor].as_str().into()],
+            )?;
+            for row in children {
+                restored.push(row[0].text_or_default());
+            }
+            cursor += 1;
+        }
+
+        self.store.transaction(|| {
+            for node_id in &restored {
+                self.store.execute(
+                    "UPDATE node SET deleted = 0, deleted_at = NULL \
+                     WHERE account_id = ? AND id = ?",
+                    &[self.account(), node_id.as_str().into()],
+                )?;
+                self.emit(
+                    node_id,
+                    EventType::Updated,
+                    None,
+                    None,
+                    Some(r#"{"deleted":false}"#),
+                )?;
+            }
+            Ok(())
+        })?;
+        Ok(restored.len())
     }
 
     /// `Tab` — become a child of the previous sibling.
@@ -1022,6 +1120,78 @@ fn decode_node(row: &[SqlValue], depth: usize) -> NodeView {
     }
 }
 
+/// The title Daybook derives from a body — its first meaningful line, with the
+/// markdown that decorates it stripped off.
+///
+/// A row showing `# August 22, 2026` is the syntax leaking into the UI; the title
+/// is the *text*, and the `#` belongs only to the body. The same reasoning applies
+/// to the report, which renders titles inside its own bullet markup.
+///
+/// Only leading block markers are stripped. Inline emphasis is left alone: `**` in
+/// the middle of a title is content, and removing it would need a full markdown
+/// parse to do correctly.
+pub fn derive_title(body: &str) -> String {
+    let Some(line) = body.lines().map(str::trim).find(|l| !l.is_empty()) else {
+        return String::new();
+    };
+
+    let mut text = line;
+    // Markers nest — `> - [ ] thing` is a quoted, unchecked list item — so peel
+    // repeatedly until nothing more comes off.
+    loop {
+        let before = text;
+
+        if let Some(rest) = text.strip_prefix('>') {
+            text = rest.trim_start();
+        }
+        // ATX heading: `#` through `######`.
+        if text.starts_with('#') {
+            let hashes = text.chars().take_while(|c| *c == '#').count();
+            if hashes <= 6 {
+                let rest = &text[hashes..];
+                // `#tag` is a tag, not a heading — a heading needs whitespace.
+                if rest.starts_with(char::is_whitespace) || rest.is_empty() {
+                    text = rest.trim_start();
+                }
+            }
+        }
+        // Bullet list: `-`, `*`, `+`, each requiring a following space so that
+        // `*emphasis*` and `-5 degrees` are not mistaken for markers.
+        for marker in ['-', '*', '+'] {
+            if let Some(rest) = text.strip_prefix(marker) {
+                if rest.starts_with(char::is_whitespace) {
+                    text = rest.trim_start();
+                    break;
+                }
+            }
+        }
+        // Ordered list: `1.` / `1)`.
+        let digits = text.chars().take_while(char::is_ascii_digit).count();
+        if digits > 0 {
+            let rest = &text[digits..];
+            if let Some(rest) = rest.strip_prefix('.').or_else(|| rest.strip_prefix(')')) {
+                if rest.starts_with(char::is_whitespace) {
+                    text = rest.trim_start();
+                }
+            }
+        }
+        // Task checkbox, which only ever follows a list marker.
+        for box_marker in ["[ ]", "[x]", "[X]"] {
+            if let Some(rest) = text.strip_prefix(box_marker) {
+                text = rest.trim_start();
+                break;
+            }
+        }
+
+        if text == before {
+            break;
+        }
+    }
+
+    // Trailing `#`s close an ATX heading and are decoration, not content.
+    text.trim_end().trim_end_matches('#').trim_end().to_owned()
+}
+
 fn decode_tag(row: &[SqlValue]) -> TagView {
     TagView {
         id: row[0].text_or_default(),
@@ -1332,6 +1502,60 @@ mod tests {
             .filter(|t| *t == "promoted")
             .count();
         assert_eq!(promotions, 1);
+    }
+
+    #[test]
+    fn demote_reverses_a_promotion_in_place() {
+        let e = engine();
+        let root = e.create_node(None, "root", None).unwrap();
+        let child = e.create_node(Some(&root.id), "child", None).unwrap();
+        let before = e.node(&child.id).unwrap().unwrap();
+
+        e.promote(&child.id).unwrap();
+        e.demote(&child.id).unwrap();
+        let after = e.node(&child.id).unwrap().unwrap();
+
+        assert!(!after.promoted);
+        assert_eq!(after.kind, Kind::ChecklistItem);
+        assert_eq!(after.parent_id, before.parent_id, "parent changed");
+        assert_eq!(after.order_key, before.order_key, "position changed");
+    }
+
+    #[test]
+    fn demoting_a_root_leaves_it_a_task() {
+        // A root node has no parent to be a checklist item of.
+        let e = engine();
+        let root = e.create_node(None, "root", None).unwrap();
+        e.promote(&root.id).unwrap();
+        e.demote(&root.id).unwrap();
+        assert_eq!(e.node(&root.id).unwrap().unwrap().kind, Kind::Task);
+    }
+
+    #[test]
+    fn restore_brings_back_a_deleted_subtree() {
+        let e = engine();
+        let root = e.create_node(None, "root", None).unwrap();
+        let child = e.create_node(Some(&root.id), "child", None).unwrap();
+        e.create_node(Some(&child.id), "grandchild", None).unwrap();
+
+        assert_eq!(e.delete_node(&root.id).unwrap(), 3);
+        assert!(e.list_tree().unwrap().is_empty());
+
+        assert_eq!(e.restore_node(&root.id).unwrap(), 3);
+        assert_eq!(titles(&e), ["root", "child", "grandchild"]);
+    }
+
+    #[test]
+    fn restore_does_not_disturb_a_separately_deleted_node() {
+        let e = engine();
+        let keep = e.create_node(None, "deleted separately", None).unwrap();
+        let undo = e.create_node(None, "deleted then undone", None).unwrap();
+
+        e.delete_node(&keep.id).unwrap();
+        e.delete_node(&undo.id).unwrap();
+        e.restore_node(&undo.id).unwrap();
+
+        assert_eq!(titles(&e), ["deleted then undone"]);
     }
 
     // -- structure ----------------------------------------------------------
@@ -1673,6 +1897,97 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    // -- derived titles -----------------------------------------------------
+
+    #[test]
+    fn title_strips_the_markdown_that_decorates_it() {
+        // The bug this fixes: rows rendered `# August 22, 2026`, syntax and all.
+        assert_eq!(derive_title("# August 22, 2026"), "August 22, 2026");
+        assert_eq!(derive_title("### Deep heading"), "Deep heading");
+        assert_eq!(derive_title("- a bullet"), "a bullet");
+        assert_eq!(derive_title("* star bullet"), "star bullet");
+        assert_eq!(derive_title("1. numbered"), "numbered");
+        assert_eq!(derive_title("2) also numbered"), "also numbered");
+        assert_eq!(derive_title("- [ ] unchecked task"), "unchecked task");
+        assert_eq!(derive_title("- [x] checked task"), "checked task");
+        assert_eq!(derive_title("> quoted"), "quoted");
+        assert_eq!(derive_title("> - [ ] quoted task"), "quoted task");
+        assert_eq!(derive_title("## Closed heading ##"), "Closed heading");
+    }
+
+    #[test]
+    fn title_leaves_content_that_merely_looks_like_syntax() {
+        // Each of these would break if markers were stripped without requiring
+        // the whitespace that actually makes them markers.
+        assert_eq!(derive_title("#urgent follow-up"), "#urgent follow-up");
+        assert_eq!(derive_title("*emphasis* first"), "*emphasis* first");
+        assert_eq!(derive_title("-5 degrees outside"), "-5 degrees outside");
+        assert_eq!(derive_title("3.5 inch floppy"), "3.5 inch floppy");
+        assert_eq!(derive_title("####### seven hashes"), "####### seven hashes");
+    }
+
+    #[test]
+    fn title_uses_the_first_non_empty_line() {
+        assert_eq!(derive_title("\n\n  \n# Real title\nbody"), "Real title");
+        assert_eq!(derive_title(""), "");
+        assert_eq!(derive_title("   \n \n"), "");
+    }
+
+    #[test]
+    fn writing_a_body_derives_the_title() {
+        let e = engine();
+        let node = e.create_node(None, "", None).unwrap();
+        e.set_body(&node.id, "# August 22, 2026\n\nThings In Progress")
+            .unwrap();
+        assert_eq!(e.node(&node.id).unwrap().unwrap().title, "August 22, 2026");
+    }
+
+    #[test]
+    fn the_derived_title_tracks_later_body_edits() {
+        let e = engine();
+        let node = e.create_node(None, "", None).unwrap();
+        e.set_body(&node.id, "first version").unwrap();
+        assert_eq!(e.node(&node.id).unwrap().unwrap().title, "first version");
+
+        e.set_body(&node.id, "second version\nwith more").unwrap();
+        assert_eq!(e.node(&node.id).unwrap().unwrap().title, "second version");
+    }
+
+    #[test]
+    fn an_explicitly_set_title_survives_body_edits() {
+        // `title` is an independent LWW field. Deriving it must never clobber a
+        // title somebody set on purpose.
+        let e = engine();
+        let node = e.create_node(None, "", None).unwrap();
+        e.set_body(&node.id, "auto from here").unwrap();
+
+        e.set_title(&node.id, "Deliberate title").unwrap();
+        e.set_body(&node.id, "body changed again").unwrap();
+
+        assert_eq!(
+            e.node(&node.id).unwrap().unwrap().title,
+            "Deliberate title",
+            "a hand-set title was overwritten by a body edit"
+        );
+    }
+
+    #[test]
+    fn clearing_the_body_clears_the_derived_title() {
+        let e = engine();
+        let node = e.create_node(None, "", None).unwrap();
+        e.set_body(&node.id, "something").unwrap();
+        e.set_body(&node.id, "").unwrap();
+        assert_eq!(e.node(&node.id).unwrap().unwrap().title, "");
+    }
+
+    #[test]
+    fn a_title_given_at_creation_is_not_derived_over() {
+        let e = engine();
+        let node = e.create_node(None, "Given up front", None).unwrap();
+        e.set_body(&node.id, "unrelated body text").unwrap();
+        assert_eq!(e.node(&node.id).unwrap().unwrap().title, "Given up front");
     }
 
     // -- diffing ------------------------------------------------------------

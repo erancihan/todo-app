@@ -25,6 +25,20 @@
         x-text="state.error"
       ></div>
 
+      <!-- `/` search. Shown only once used, so it costs no space when idle. -->
+      <div x-show="state.searchOpen || state.query" x-cloak class="mb-3">
+        <input
+          data-search
+          type="text"
+          placeholder="Filter todos…"
+          :value="state.query"
+          x-init="$watch('state.searchOpen', open => open && $nextTick(() => $el.focus()))"
+          class="w-full rounded-[var(--radius)] border bg-transparent px-3 py-1.5 text-[0.8125rem] outline-none"
+          style="border-color: var(--border)"
+          @input="onQuery($event.target.value)"
+        />
+      </div>
+
       <!-- The list. `tabindex` so it can hold focus in LIST mode; the keydown
            listener is global, registered by the controller. -->
       <ul data-list tabindex="0" class="outline-none" role="tree" aria-label="Todos">
@@ -49,10 +63,14 @@
 
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2">
+                  <!-- `title` is derived from the body's first line by the engine,
+                       with the markdown stripped — never rendered raw here. -->
                   <span
                     class="truncate text-[0.8125rem]"
-                    :class="node.status === 'done' ? 'line-through opacity-55' : ''"
-                    x-text="node.title || node.bodyMd.split('\n')[0] || 'Untitled'"
+                    :class="node.status === 'done'
+                      ? 'line-through opacity-55'
+                      : (node.title ? '' : 'text-muted-foreground italic')"
+                    x-text="node.title || 'Untitled'"
                   ></span>
 
                   <!-- A promoted sub-item keeps its place but gains a marker. -->
@@ -76,12 +94,12 @@
                 <!-- The editor mounts here when this row is being edited. -->
                 <div x-show="isEditing(node.id)" x-cloak :data-editor-slot="node.id"></div>
 
-                <!-- Otherwise show a one-line preview of the body, if any. -->
+                <!-- The body beyond the title line, as a one-line preview. -->
                 <p
-                  x-show="!isEditing(node.id) && node.bodyMd.trim()"
+                  x-show="!isEditing(node.id) && preview(node)"
                   x-cloak
                   class="truncate text-[0.75rem] text-muted-foreground"
-                  x-text="node.bodyMd.split('\n').filter(Boolean)[1] || ''"
+                  x-text="preview(node)"
                 ></p>
               </div>
             </div>
@@ -110,8 +128,123 @@
         style="border-color: var(--border); background: var(--card)"
         :style="state.mode === 'edit' ? 'color: var(--primary)' : ''"
         aria-live="polite"
-        x-text="state.mode.toUpperCase()"
+        x-text="state.pendingKey ? state.pendingKey + '…' : state.mode.toUpperCase()"
       ></div>
+
+      <!-- `t` tag editor. Axis 2: flat, cross-cutting labels. -->
+      <div
+        x-show="state.tagEditorOpen"
+        x-cloak
+        class="fixed inset-0 z-50 flex items-start justify-center p-6 pt-[20vh]"
+        style="background: rgb(0 0 0 / 0.55)"
+        @click="closeOverlays(); tagDraft = ''"
+      >
+        <div
+          class="w-full max-w-md rounded-[var(--radius-lg)] border p-4"
+          style="border-color: var(--border); background: var(--popover)"
+          @click.stop
+        >
+          <h2 class="mb-2 text-[0.8125rem] font-[560]">
+            Tags for <span class="text-muted-foreground" x-text="focused?.title || 'Untitled'"></span>
+          </h2>
+
+          <!-- Current tags, each removable. -->
+          <div class="mb-3 flex flex-wrap gap-1.5" x-show="focused?.tags.length">
+            <template x-for="tag in focused?.tags ?? []" :key="tag.id">
+              <button
+                type="button"
+                class="rounded-full px-2 py-0.5 text-[0.6875rem]"
+                :class="`tag-${tag.color}`"
+                @click="dropTag(tag.id)"
+                :title="`Remove #${tag.name}`"
+                x-text="`#${tag.name} ×`"
+              ></button>
+            </template>
+          </div>
+
+          <input
+            x-model="tagDraft"
+            x-init="$watch('state.tagEditorOpen', open => open && $nextTick(() => $el.focus()))"
+            type="text"
+            placeholder="Add a tag, Enter to apply…"
+            class="w-full rounded-[var(--radius)] border bg-transparent px-2.5 py-1.5 text-[0.8125rem] outline-none"
+            style="border-color: var(--border)"
+            @keydown.enter.prevent="submitTag()"
+            @keydown.escape.prevent="closeOverlays(); tagDraft = ''"
+          />
+
+          <!-- Existing tags in the account, so the vocabulary stays small. -->
+          <div class="mt-3 flex flex-wrap gap-1.5" x-show="state.allTags.length">
+            <template x-for="tag in state.allTags" :key="tag.id">
+              <button
+                type="button"
+                class="rounded-full px-2 py-0.5 text-[0.6875rem] opacity-70 hover:opacity-100"
+                :class="`tag-${tag.color}`"
+                @click="tagDraft = tag.name; submitTag()"
+                x-text="`#${tag.name}`"
+              ></button>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- `c` collections picker. Axis 1: many-to-many, so this is multi-select. -->
+      <div
+        x-show="state.collectionPickerOpen"
+        x-cloak
+        class="fixed inset-0 z-50 flex items-start justify-center p-6 pt-[20vh]"
+        style="background: rgb(0 0 0 / 0.55)"
+        @click="closeOverlays(); collectionDraft = ''"
+      >
+        <div
+          class="w-full max-w-md rounded-[var(--radius-lg)] border p-4"
+          style="border-color: var(--border); background: var(--popover)"
+          @click.stop
+        >
+          <h2 class="mb-1 text-[0.8125rem] font-[560]">
+            Collections for
+            <span class="text-muted-foreground" x-text="focused?.title || 'Untitled'"></span>
+          </h2>
+          <p class="mb-3 text-[0.6875rem] text-muted-foreground">
+            An item can live in several at once.
+          </p>
+
+          <ul class="mb-3 max-h-60 overflow-y-auto" x-show="state.allCollections.length">
+            <template x-for="col in state.allCollections" :key="col.id">
+              <li>
+                <button
+                  type="button"
+                  class="flex w-full items-center gap-2 rounded-[var(--radius-sm)] px-2 py-1.5 text-left text-[0.8125rem] hover:bg-muted"
+                  @click="toggleCollection(col.id)"
+                >
+                  <span
+                    class="size-[13px] shrink-0 rounded-[3px] border"
+                    :style="inCollection(col.id)
+                      ? 'background: var(--primary); border-color: var(--primary)'
+                      : 'border-color: var(--border)'"
+                  ></span>
+                  <span x-text="col.name"></span>
+                  <span
+                    class="ml-auto font-mono text-[0.625rem] text-muted-foreground"
+                    x-text="col.nodeCount"
+                  ></span>
+                </button>
+              </li>
+            </template>
+          </ul>
+
+          <input
+            x-model="collectionDraft"
+            x-init="$watch('state.collectionPickerOpen', open => open && $nextTick(() => $el.focus()))"
+            type="text"
+            placeholder="New collection, Enter to create…"
+            class="w-full rounded-[var(--radius)] border bg-transparent px-2.5 py-1.5 text-[0.8125rem] outline-none"
+            style="border-color: var(--border)"
+            @keydown.enter.prevent="submitCollection()"
+            @keydown.escape.prevent="closeOverlays(); collectionDraft = ''"
+          />
+        </div>
+      </div>
 
       <!-- `?` cheat sheet -->
       <div

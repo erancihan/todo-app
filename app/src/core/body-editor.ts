@@ -14,6 +14,7 @@ import { defaultKeymap, history, historyKeymap, insertNewlineAndIndent } from "@
 import { markdown } from "@codemirror/lang-markdown";
 import { EditorState, type Extension } from "@codemirror/state";
 import { EditorView, keymap, placeholder } from "@codemirror/view";
+import { livePreview } from "./live-preview";
 
 export interface BodyEditorCallbacks {
   /** `Ctrl/Cmd+Enter`. */
@@ -73,6 +74,7 @@ export class BodyEditor {
       ]),
       keymap.of([...defaultKeymap, ...historyKeymap]),
       markdown(),
+      livePreview(),
       EditorView.lineWrapping,
       placeholder("Write markdown… Ctrl/Cmd+Enter to submit"),
       EditorView.updateListener.of((update) => {

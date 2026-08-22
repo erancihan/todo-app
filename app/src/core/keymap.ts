@@ -169,14 +169,58 @@ function resolveList(k: KeyInput): Action | null {
 }
 
 /**
- * Resolve a key press to an intent, or `null` when the key is not bound and should
- * be left alone (in EDIT mode that means "let CodeMirror type it").
+ * Resolve a single key press to an intent, or `null` when the key is not bound
+ * and should be left alone (in EDIT mode that means "let CodeMirror type it").
  *
- * Multi-key sequences (`gg`, `dd`) are not handled here — they need a pending-key
- * buffer, which lands with the Phase 1 list controller.
+ * Single keys only. Two-key sequences go through [`resolveKey`].
  */
 export function resolve(k: KeyInput, mode: Mode): Action | null {
   return resolveGlobal(k) ?? (mode === "edit" ? resolveEdit(k) : resolveList(k));
+}
+
+/**
+ * Two-key sequences, vim-style (docs/04 §4.1).
+ *
+ * Kept apart from the single-key table because they need a pending-key buffer:
+ * the first press cannot be resolved until the second arrives.
+ */
+export const SEQUENCES: Record<string, Action> = {
+  dd: "delete",
+  gg: "jump-first",
+};
+
+/** Keys that might begin a sequence, derived so the two cannot drift apart. */
+const SEQUENCE_STARTERS = new Set(Object.keys(SEQUENCES).map((s) => s[0]!));
+
+/** What a key press means once sequences are taken into account. */
+export type KeyResolution =
+  | { kind: "action"; action: Action }
+  | { kind: "sequence-start"; key: string }
+  | { kind: "unbound" };
+
+/**
+ * Resolve a key press, honouring an in-flight sequence.
+ *
+ * `pending` is the previously pressed key when one is buffered. A second press
+ * either completes a known sequence or aborts it — and on abort the key is
+ * re-resolved on its own, so `d` then `j` still moves down rather than being
+ * swallowed.
+ */
+export function resolveKey(k: KeyInput, mode: Mode, pending: string | null): KeyResolution {
+  const single = resolve(k, mode);
+
+  if (pending) {
+    const sequence = SEQUENCES[pending + k.key];
+    if (sequence) return { kind: "action", action: sequence };
+    // Not a sequence after all — fall through and treat this key on its own.
+  }
+
+  // Sequences are a LIST-mode idea; in EDIT mode `d` is just a letter.
+  if (mode === "list" && !single && SEQUENCE_STARTERS.has(k.key)) {
+    return { kind: "sequence-start", key: k.key };
+  }
+
+  return single ? { kind: "action", action: single } : { kind: "unbound" };
 }
 
 /**

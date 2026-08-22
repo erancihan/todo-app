@@ -41,6 +41,8 @@ function fakeEngine(tree: NodeView[]): EnginePort {
     setStatus: vi.fn(stub),
     toggleDone: vi.fn(stub),
     promote: vi.fn(stub),
+    demote: vi.fn(stub),
+    restoreNode: vi.fn(() => Promise.resolve(1)),
     indent: vi.fn(stub),
     outdent: vi.fn(stub),
     moveNode: vi.fn(stub),
@@ -218,6 +220,97 @@ describe("key handling", () => {
   });
 });
 
+describe("two-key sequences", () => {
+  let controller: ListController;
+
+  beforeEach(async () => {
+    controller = new ListController(fakeEngine(TREE), host);
+    await controller.refresh();
+  });
+
+  function press(key: string) {
+    const event = {
+      key,
+      shiftKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+      preventDefault: () => {},
+    } as unknown as KeyboardEvent;
+    return controller.handleKey(event);
+  }
+
+  it("buffers the first key and shows it", () => {
+    expect(press("d")).toBe(true);
+    expect(controller.snapshot.pendingKey).toBe("d");
+  });
+
+  it("dd deletes and clears the buffer", async () => {
+    press("d");
+    press("d");
+    await vi.waitFor(() => expect(controller.snapshot.pendingKey).toBeNull());
+  });
+
+  it("gg jumps to the first row", async () => {
+    await controller.dispatch("jump-last");
+    expect(controller.snapshot.focusedId).toBe("second");
+    press("g");
+    press("g");
+    await vi.waitFor(() => expect(controller.snapshot.focusedId).toBe("root"));
+  });
+
+  it("an aborted sequence still runs the second key on its own", async () => {
+    // `d` then `j` must move down, not swallow the j.
+    expect(controller.snapshot.focusedId).toBe("root");
+    press("d");
+    press("j");
+    await vi.waitFor(() => expect(controller.snapshot.focusedId).toBe("child-a"));
+    expect(controller.snapshot.pendingKey).toBeNull();
+  });
+
+  it("does not start a sequence in EDIT mode", async () => {
+    await controller.dispatch("edit");
+    expect(press("d")).toBe(false);
+    expect(controller.snapshot.pendingKey).toBeNull();
+  });
+});
+
+describe("search", () => {
+  let controller: ListController;
+
+  beforeEach(async () => {
+    controller = new ListController(fakeEngine(TREE), host);
+    await controller.refresh();
+  });
+
+  it("shows everything when the query is empty", () => {
+    expect(controller.visible).toHaveLength(4);
+  });
+
+  it("filters to matching rows", () => {
+    controller.setQuery("second");
+    expect(controller.visible.map((n) => n.id)).toEqual(["second"]);
+  });
+
+  it("keeps ancestors of a match so the tree stays coherent", () => {
+    // `child-b` matches; `root` does not, but dropping it would leave a child
+    // rendered at depth 1 with no visible parent.
+    controller.setQuery("child-b");
+    expect(controller.visible.map((n) => n.id)).toEqual(["root", "child-b"]);
+  });
+
+  it("matches on tag name too", () => {
+    const tagged = TREE.map((n) =>
+      n.id === "second" ? { ...n, tags: [{ id: "t1", name: "urgent", color: "rose" }] } : n,
+    );
+    const c = new ListController(fakeEngine(tagged), host);
+    return c.refresh().then(() => {
+      c.setQuery("urgent");
+      expect(c.visible.map((n) => n.id)).toEqual(["second"]);
+    });
+  });
+});
+
 describe("overlays", () => {
   it("? toggles the cheat sheet and Esc clears it", async () => {
     const c = new ListController(fakeEngine(TREE), host);
@@ -227,6 +320,172 @@ describe("overlays", () => {
     expect(c.snapshot.cheatSheetOpen).toBe(true);
     await c.dispatch("clear");
     expect(c.snapshot.cheatSheetOpen).toBe(false);
+  });
+});
+
+describe("abandoned empty rows", () => {
+  /** A tree with one real row and one blank capture row left behind. */
+  const WITH_BLANK = [
+    node({ id: "real", title: "Real todo", bodyMd: "Real todo\nbody" }),
+    node({ id: "blank", title: "", bodyMd: "" }),
+  ];
+
+  it("deletes a blank row on leaving it", async () => {
+    const engine = fakeEngine(WITH_BLANK);
+    const c = new ListController(engine, host);
+    await c.refresh();
+    c.focus("blank");
+
+    await c.exitEdit();
+    expect(engine.deleteNode).toHaveBeenCalledWith("blank");
+  });
+
+  it("keeps a row that has content", async () => {
+    const engine = fakeEngine(WITH_BLANK);
+    const c = new ListController(engine, host);
+    await c.refresh();
+    c.focus("real");
+
+    await c.exitEdit();
+    expect(engine.deleteNode).not.toHaveBeenCalled();
+  });
+
+  it("keeps a blank row that carries tags", async () => {
+    // No text, but the user put a tag on it — that is intent, not litter.
+    const tagged = [
+      node({ id: "blank", tags: [{ id: "t", name: "later", color: "slate" }], title: "" }),
+    ];
+    const engine = fakeEngine(tagged);
+    const c = new ListController(engine, host);
+    await c.refresh();
+    c.focus("blank");
+
+    await c.exitEdit();
+    expect(engine.deleteNode).not.toHaveBeenCalled();
+  });
+
+  it("keeps a blank parent that has children", async () => {
+    const parent = [
+      node({ id: "blank", title: "", hasChildren: true }),
+      node({ id: "kid", parentId: "blank", depth: 1, title: "child" }),
+    ];
+    const engine = fakeEngine(parent);
+    const c = new ListController(engine, host);
+    await c.refresh();
+    c.focus("blank");
+
+    await c.exitEdit();
+    expect(engine.deleteNode).not.toHaveBeenCalled();
+  });
+
+  it("submitting an empty row ends the streak instead of opening another", async () => {
+    const engine = fakeEngine(WITH_BLANK);
+    const c = new ListController(engine, host);
+    await c.refresh();
+    c.focus("blank");
+
+    await c.submit();
+    expect(engine.createNode).not.toHaveBeenCalled();
+    expect(engine.deleteNode).toHaveBeenCalledWith("blank");
+  });
+
+  it("submitting a row with content does open the next one", async () => {
+    const engine = fakeEngine(WITH_BLANK);
+    const c = new ListController(engine, host);
+    await c.refresh();
+    c.focus("real");
+
+    await c.submit();
+    expect(engine.createNode).toHaveBeenCalled();
+  });
+});
+
+describe("undo / redo", () => {
+  let engine: EnginePort;
+  let controller: ListController;
+
+  beforeEach(async () => {
+    engine = fakeEngine(TREE);
+    controller = new ListController(engine, host);
+    await controller.refresh();
+  });
+
+  const spy = (name: keyof EnginePort) => engine[name] as ReturnType<typeof vi.fn>;
+
+  it("does nothing when there is no history", async () => {
+    await controller.dispatch("undo");
+    expect(controller.snapshot.canUndo).toBe(false);
+    expect(spy("toggleDone")).not.toHaveBeenCalled();
+  });
+
+  it("undoes a toggle by toggling back", async () => {
+    await controller.dispatch("toggle-done");
+    expect(controller.snapshot.canUndo).toBe(true);
+
+    await controller.dispatch("undo");
+    expect(spy("toggleDone")).toHaveBeenCalledTimes(2);
+    expect(controller.snapshot.canRedo).toBe(true);
+  });
+
+  it("undoes a promote by demoting", async () => {
+    await controller.dispatch("promote");
+    await controller.dispatch("undo");
+    expect(spy("demote")).toHaveBeenCalledWith("root");
+  });
+
+  it("undoes a delete by restoring", async () => {
+    await controller.dispatch("delete");
+    await controller.dispatch("undo");
+    expect(spy("restoreNode")).toHaveBeenCalledWith("root");
+  });
+
+  it("undoes an indent by moving the node back where it was", async () => {
+    // `child-b` sits after `child-a` under `root`; undo must restore both the
+    // parent and the position, which plain outdent would not do.
+    controller.focus("child-b");
+    await controller.dispatch("indent");
+    await controller.dispatch("undo");
+    expect(spy("moveNode")).toHaveBeenCalledWith("child-b", "root", "child-a");
+  });
+
+  it("redo replays the original action", async () => {
+    await controller.dispatch("promote");
+    await controller.dispatch("undo");
+    await controller.dispatch("redo");
+    expect(spy("promote")).toHaveBeenCalledTimes(2);
+    expect(controller.snapshot.canUndo).toBe(true);
+  });
+
+  it("a new action clears the redo branch", async () => {
+    await controller.dispatch("toggle-done");
+    await controller.dispatch("undo");
+    expect(controller.snapshot.canRedo).toBe(true);
+
+    await controller.dispatch("promote");
+    expect(controller.snapshot.canRedo).toBe(false);
+  });
+
+  it("promoting an already-promoted node records nothing", async () => {
+    // Otherwise undo would "demote" a node the action never promoted.
+    const promoted = TREE.map((n) => (n.id === "root" ? { ...n, promoted: true } : n));
+    const e = fakeEngine(promoted);
+    const c = new ListController(e, host);
+    await c.refresh();
+
+    await c.dispatch("promote");
+    expect(c.snapshot.canUndo).toBe(false);
+    expect(e.promote).not.toHaveBeenCalled();
+  });
+
+  it("undoes several steps in reverse order", async () => {
+    await controller.dispatch("toggle-done");
+    await controller.dispatch("promote");
+
+    await controller.dispatch("undo");
+    expect(spy("demote")).toHaveBeenCalled();
+    await controller.dispatch("undo");
+    expect(spy("toggleDone")).toHaveBeenCalledTimes(2);
+    expect(controller.snapshot.canUndo).toBe(false);
   });
 });
 

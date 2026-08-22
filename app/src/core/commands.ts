@@ -27,8 +27,15 @@ export const PALETTE_COMMANDS: Command[] = [
   { id: "indent", label: "Indent", keys: ["Tab"] },
   { id: "outdent", label: "Outdent", keys: ["Shift+Tab"] },
   { id: "delete", label: "Delete", keys: ["d d"] },
+  { id: "open-tags", label: "Edit tags", keys: ["t"] },
+  { id: "open-collections", label: "Edit collections", keys: ["c"] },
+  { id: "focus-search", label: "Search", keys: ["/"] },
+  { id: "undo", label: "Undo", keys: ["u", "Ctrl/Cmd+Z"] },
+  { id: "redo", label: "Redo", keys: ["Ctrl/Cmd+Shift+Z"] },
   { id: "focus-next", label: "Move focus down", keys: ["j", "↓"] },
   { id: "focus-prev", label: "Move focus up", keys: ["k", "↑"] },
+  { id: "jump-first", label: "Jump to first", keys: ["g g"] },
+  { id: "jump-last", label: "Jump to last", keys: ["G"] },
   { id: "cheat-sheet", label: "Keyboard cheat sheet", keys: ["?"] },
 ];
 
@@ -52,6 +59,11 @@ export const CHEAT_SHEET: CheatSheetSection[] = [
       { keys: "x / Space", action: "Toggle done" },
       { keys: "p", action: "Promote to full todo" },
       { keys: "n", action: "Quick-add" },
+      { keys: "t", action: "Edit tags" },
+      { keys: "c", action: "Edit collections" },
+      { keys: "d d", action: "Delete" },
+      { keys: "g g / G", action: "Jump to first / last" },
+      { keys: "u", action: "Undo" },
     ],
   },
   {
@@ -67,6 +79,9 @@ export const CHEAT_SHEET: CheatSheetSection[] = [
     title: "Anywhere",
     rows: [
       { keys: "Ctrl/Cmd+K", action: "Command palette" },
+      { keys: "/", action: "Search" },
+      { keys: "Ctrl/Cmd+Z", action: "Undo" },
+      { keys: "Ctrl/Cmd+Shift+Z", action: "Redo" },
       { keys: "?", action: "This cheat sheet" },
     ],
   },

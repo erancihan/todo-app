@@ -82,6 +82,8 @@ export interface EnginePort {
   setStatus(id: string, status: Status): Promise<void>;
   toggleDone(id: string): Promise<void>;
   promote(id: string): Promise<void>;
+  demote(id: string): Promise<void>;
+  restoreNode(id: string): Promise<number>;
   indent(id: string): Promise<void>;
   outdent(id: string): Promise<void>;
   moveNode(id: string, newParent: string | null, after: string | null): Promise<void>;
@@ -142,6 +144,12 @@ class TauriEnginePort implements EnginePort {
   }
   promote(id: string) {
     return this.invoke<void>("promote", { id });
+  }
+  demote(id: string) {
+    return this.invoke<void>("demote", { id });
+  }
+  restoreNode(id: string) {
+    return this.invoke<number>("restore_node", { id });
   }
   indent(id: string) {
     return this.invoke<void>("indent", { id });
@@ -255,6 +263,12 @@ class WasmEnginePort implements EnginePort {
   }
   promote(id: string) {
     return this.call<void>("promote", id);
+  }
+  demote(id: string) {
+    return this.call<void>("demote", id);
+  }
+  restoreNode(id: string) {
+    return this.call<number>("restoreNode", id);
   }
   indent(id: string) {
     return this.call<void>("indent", id);

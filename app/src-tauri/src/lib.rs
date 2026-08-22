@@ -131,6 +131,21 @@ fn promote(state: tauri::State<'_, AppState>, id: String) -> CmdResult<()> {
 }
 
 #[tauri::command]
+fn demote(state: tauri::State<'_, AppState>, id: String) -> CmdResult<()> {
+    state.engine.lock().unwrap().demote(&id).map_err(to_err)
+}
+
+#[tauri::command]
+fn restore_node(state: tauri::State<'_, AppState>, id: String) -> CmdResult<usize> {
+    state
+        .engine
+        .lock()
+        .unwrap()
+        .restore_node(&id)
+        .map_err(to_err)
+}
+
+#[tauri::command]
 fn indent(state: tauri::State<'_, AppState>, id: String) -> CmdResult<()> {
     state.engine.lock().unwrap().indent(&id).map_err(to_err)
 }
@@ -309,6 +324,8 @@ pub fn run() {
             set_status,
             toggle_done,
             promote,
+            demote,
+            restore_node,
             indent,
             outdent,
             move_node,
