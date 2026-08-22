@@ -7,10 +7,20 @@ import tailwindcss from "@tailwindcss/vite";
 export default defineConfig({
   plugins: [tailwindcss()],
   // Tauri expects a fixed port and must not silently fall back to another one.
+  // `host: 0.0.0.0` also makes the server reachable from a phone on the LAN and
+  // from Windows when the dev server runs inside WSL.
   server: {
     port: 1420,
     strictPort: true,
     host: "0.0.0.0",
+    watch: {
+      // Windows drives mounted into WSL (/mnt/c/...) do not deliver inotify
+      // events, so HMR silently stops working — edits just never appear. The
+      // Makefile sets this when it detects that case. Polling is wasteful, so it
+      // stays off everywhere else.
+      usePolling: process.env.CHOKIDAR_USEPOLLING === "1",
+      interval: 300,
+    },
   },
   build: {
     // The WebView floor across the matrix: WKWebView (iOS/macOS), WebView2,

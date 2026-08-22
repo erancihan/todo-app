@@ -55,34 +55,53 @@ there is only one engine. Widening `Store` is how that guarantee would be lost.
 ### Getting started
 
 ```bash
-# Rust — the toolchain is pinned in rust-toolchain.toml
-cargo test -p daybook-core -p daybook-relay   # 68 tests, incl. the Phase 1 engine suite
-cargo build -p daybook-core --target wasm32-unknown-unknown   # the browser build is a gate
-
-# Web UI. `npm run dev` builds the wasm engine first — without it there is no engine.
-cd app && npm ci
-npm test                      # keymap + list-controller tests (44)
-npm run dev                   # browser, http://localhost:1420
-npm run tauri dev             # desktop shell (needs a system WebView)
-node scripts/smoke-browser.mjs  # drives the real app against real OPFS in Chromium
-
-# Headless Linux desktop run (no display needed) — writes a screenshot
-bash scripts/run-linux-desktop.sh
-
-# Phase 0 spikes
-cd spikes && npm install && npm run build:wasm && npm run test:headless
+make setup     # Rust target, npm deps, and the pinned wasm-bindgen CLI
+make doctor    # confirm this machine can build and run everything
+make dev       # browser dev server on http://localhost:1420
 ```
+
+Run `make` on its own for the full target list. The ones you'll use:
+
+| | |
+| --- | --- |
+| `make dev` | Browser dev server — the usual loop |
+| `make dev-desktop` | The Tauri desktop shell |
+| `make check` | fmt + clippy + all tests (what CI runs) |
+| `make smoke` | Drives the real app against real OPFS in headless Chromium |
+| `make desktop-shot` | Runs the desktop app headless and screenshots it |
+| `make clean-data` | Deletes the local database — destructive |
 
 Building the browser engine needs the wasm-bindgen CLI at the **exact** pinned
-version — a mismatch fails at runtime, not build time:
-
-```bash
-cargo install wasm-bindgen-cli --version 0.2.126 --locked
-```
+version; a mismatch fails at runtime, not build time. `make setup` handles it, and
+`make doctor` flags a drift.
 
 Pinned versions live in [`Cargo.toml`](Cargo.toml) (`[workspace.dependencies]`, all
 `=exact`), [`app/package.json`](app/package.json), and
 [`rust-toolchain.toml`](rust-toolchain.toml).
+
+### Running under WSL
+
+WSL is where Linux gets tested. `make doctor` reports which of these apply:
+
+- **Keep the repo in the WSL filesystem** (`~/…`), not on `/mnt/c`. Windows drives
+  don't deliver inotify events, so Vite's hot reload silently stops working — edits
+  just never appear. The Makefile switches to a polling watcher when it detects
+  this, but builds are still several times slower over the 9p bridge.
+- **`make dev-desktop` needs WSLg** for a window to open. If `DISPLAY` is unset,
+  the target says so and points at `wsl --update`. `make desktop-shot` works
+  headless either way.
+- **The desktop shell is forced to software rendering** under WSL
+  (`WEBKIT_DISABLE_COMPOSITING_MODE`, `WEBKIT_DISABLE_DMABUF_RENDERER`). Without
+  those the WebKitGTK process dies before it paints, which looks like the app
+  failing to start for no reason.
+- Desktop system deps, if `make doctor` reports them missing:
+  ```bash
+  sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev \
+    libayatana-appindicator3-dev librsvg2-dev patchelf
+  ```
+
+A green run under WSL is WebKitGTK, **not** WKWebView — it says nothing about how
+macOS or iOS will render.
 
 ### Known deviations from the docs
 
