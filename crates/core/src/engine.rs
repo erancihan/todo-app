@@ -88,9 +88,11 @@ pub struct EventView {
     pub occurred_ms: i64,
 }
 
-/// The 8 muted tag hues (docs/04-ux-and-interaction.md §7.1), assigned round-robin
-/// so a new tag gets a stable colour without asking the user to pick one.
-const TAG_HUES: [&str; 8] = [
+/// The 8 muted hues (docs/04-ux-and-interaction.md §7.1), assigned round-robin so
+/// a new tag or collection gets a stable colour without asking the user to pick
+/// one. Assigned here rather than derived in the UI so the colour is durable: it
+/// survives a reload and is the same on every host.
+const HUES: [&str; 8] = [
     "slate", "rose", "amber", "pink", "emerald", "cyan", "violet", "lime",
 ];
 
@@ -909,7 +911,7 @@ impl<S: Store> Engine<S> {
                 let tag = TagView {
                     id: new_id().to_string(),
                     name: name.to_owned(),
-                    color: TAG_HUES[count as usize % TAG_HUES.len()].to_owned(),
+                    color: HUES[count as usize % HUES.len()].to_owned(),
                 };
                 self.store.execute(
                     "INSERT INTO tag (account_id, id, name, color) VALUES (?, ?, ?, ?)",
@@ -1005,15 +1007,27 @@ impl<S: Store> Engine<S> {
         }
         let id = new_id().to_string();
         let now = self.now_ms();
+        // Same round-robin as tags: the sidebar needs a dot colour per collection,
+        // and picking it here means the colour is stored once rather than
+        // re-derived (and possibly differently) by each host's UI.
+        let count = self
+            .store
+            .query_i64(
+                "SELECT COUNT(*) FROM collection WHERE account_id = ?",
+                &[self.account()],
+            )?
+            .unwrap_or(0);
+        let color = HUES[count as usize % HUES.len()].to_owned();
         self.store.execute(
-            "INSERT INTO collection (account_id, id, name, parent_id, owner_id, created_at, \
-             updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO collection (account_id, id, name, parent_id, owner_id, color, \
+             created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             &[
                 self.account(),
                 id.as_str().into(),
                 name.into(),
                 parent_id.map(str::to_owned).into(),
                 self.account(),
+                color.as_str().into(),
                 now.into(),
                 now.into(),
             ],
@@ -1022,7 +1036,7 @@ impl<S: Store> Engine<S> {
             id,
             name: name.to_owned(),
             parent_id: parent_id.map(str::to_owned),
-            color: String::new(),
+            color,
             icon: String::new(),
             node_count: 0,
         })
@@ -1905,12 +1919,34 @@ mod tests {
         let e = engine();
         let node = e.create_node(None, "task", None).unwrap();
         let mut seen = Vec::new();
-        for i in 0..TAG_HUES.len() {
+        for i in 0..HUES.len() {
             seen.push(e.add_tag(&node.id, &format!("tag{i}")).unwrap().color);
         }
         seen.sort();
         seen.dedup();
-        assert_eq!(seen.len(), TAG_HUES.len(), "hues were not distinct");
+        assert_eq!(seen.len(), HUES.len(), "hues were not distinct");
+    }
+
+    #[test]
+    fn collections_get_a_hue_that_survives_a_reload() {
+        let e = engine();
+        let a = e.create_collection("Work", None).unwrap();
+        let b = e.create_collection("Home", None).unwrap();
+        assert!(!a.color.is_empty(), "collection created without a colour");
+        assert_ne!(a.color, b.color, "consecutive collections share a hue");
+
+        // The sidebar reads `list_collections`, not the create result — the two
+        // must agree or the dot changes colour the moment the page reloads.
+        let listed = e.list_collections().unwrap();
+        let stored = |id: &str| {
+            listed
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| c.color.clone())
+                .unwrap()
+        };
+        assert_eq!(stored(&a.id), a.color);
+        assert_eq!(stored(&b.id), b.color);
     }
 
     #[test]

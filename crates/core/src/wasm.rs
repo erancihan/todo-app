@@ -142,8 +142,20 @@ pub struct DaybookEngine {
     inner: RefCell<Engine<JsStore>>,
 }
 
+/// Serialize with `Option::None` as `null`, **not** `undefined`.
+///
+/// This is not cosmetic. `serde_wasm_bindgen` defaults to `undefined`, while the
+/// Tauri host goes through `serde_json` and produces `null` — so the same field
+/// on the same node had two different values depending on the host, and the
+/// TypeScript types (`string | null`) described only one of them. Any `=== null`
+/// test in the shared UI silently answered `false` in the browser: it is what
+/// made `n` insert at the top of the list there and below the focused row on the
+/// desktop, from identical code.
 fn to_js<T: serde::Serialize>(value: &T) -> std::result::Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(value).map_err(|e| JsValue::from_str(&e.to_string()))
+    let serializer = serde_wasm_bindgen::Serializer::new().serialize_missing_as_null(true);
+    value
+        .serialize(&serializer)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 fn err(e: CoreError) -> JsValue {

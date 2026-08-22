@@ -140,6 +140,20 @@ try {
     `got ${JSON.stringify(titles)}`,
   );
 
+  // The wasm boundary must hand `null` to JS for an absent value, not
+  // `undefined` — `serde_wasm_bindgen` defaults to the latter while the Tauri
+  // host produces the former, and the shared UI does `=== null` tests that then
+  // answer differently on each host. This is a contract check, not a UI one.
+  const optionals = await page.evaluate(() => {
+    const root = window.Alpine.$data(document.getElementById("app")).state.nodes[0];
+    return { parentId: root.parentId, dueAt: root.dueAt, completedAt: root.completedAt };
+  });
+  check(
+    "absent fields cross the wasm boundary as null, not undefined",
+    optionals.parentId === null && optionals.dueAt === null && optionals.completedAt === null,
+    `got ${JSON.stringify(Object.entries(optionals).map(([k, v]) => `${k}=${v === undefined ? "undefined" : v}`))}`,
+  );
+
   // `x` toggles done on the focused row.
   await page.keyboard.press("k");
   await page.keyboard.press("k");

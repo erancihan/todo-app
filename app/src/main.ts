@@ -14,6 +14,27 @@ import { engine, isTauri, type NodeView } from "./core/engine-port";
 import { ListController, type ListState } from "./core/list-controller";
 import { CHEAT_SHEET, PALETTE_COMMANDS } from "./core/commands";
 
+type SidebarRow = ListController["sidebarRows"][number];
+
+/**
+ * The eight muted hue names the engine assigns, mapped to the same values
+ * `app.css` gives the tag pills. Kept in one place so a collection dot and a tag
+ * chip of the same hue are actually the same colour.
+ */
+const HUES: Record<string, string> = {
+  slate: "#64748b",
+  rose: "#e5678a",
+  amber: "#e0a03a",
+  pink: "#db7bc0",
+  emerald: "#3fb984",
+  cyan: "#3fa9c9",
+  violet: "#9b7be0",
+  lime: "#8dbf3f",
+};
+
+/** Where the sidebar's collapsed state is remembered between sessions. */
+const SIDEBAR_KEY = "daybook.sidebarCollapsed";
+
 interface AppComponent {
   state: ListState;
   visible: NodeView[];
@@ -30,6 +51,17 @@ interface AppComponent {
   statusDot(node: NodeView): { color: string; label: string } | null;
   childCount(node: NodeView): string;
   collectionName(id: string): string;
+  collectionColor(hue: string): string;
+  collectionDotColor(id: string): string;
+  // -- sidebar
+  /** Mirrored reactively for the same reason as `focused` — see below. */
+  sidebarRows: SidebarRow[];
+  selectCollection(id: string | null): void;
+  toggleSidebar(): void;
+  newCollection(): void;
+  newCollectionOpen: boolean;
+  newCollectionDraft: string;
+  submitNewCollection(): void;
   paletteResults(): typeof PALETTE_COMMANDS;
   runCommand(id: string): void;
   cheatSheet: typeof CHEAT_SHEET;
@@ -109,6 +141,8 @@ Alpine.data("daybook", (): AppComponent => {
       searchOpen: false,
       allTags: [],
       allCollections: [],
+      activeCollectionId: null,
+      sidebarCollapsed: false,
       pendingKey: null,
       yankedId: null,
       canUndo: false,
@@ -121,6 +155,9 @@ Alpine.data("daybook", (): AppComponent => {
     tagDraft: "",
     collectionDraft: "",
     focused: null,
+    sidebarRows: [],
+    newCollectionOpen: false,
+    newCollectionDraft: "",
 
     init() {
       controller = new ListController(port, {
@@ -136,10 +173,30 @@ Alpine.data("daybook", (): AppComponent => {
         editorText: () => editor?.text() ?? "",
       });
 
+      // The sidebar starts where it was left. A collapsed rail that silently
+      // re-expands every launch is the kind of small betrayal that makes a
+      // preference feel broken.
+      try {
+        controller.setSidebarCollapsed(localStorage.getItem(SIDEBAR_KEY) === "1");
+      } catch {
+        // Private windows and blocked site data throw on access, not on read.
+      }
+
+      let lastCollapsed = controller.snapshot.sidebarCollapsed;
       controller.subscribe((state) => {
         this.state = state;
         this.visible = controller.visible;
         this.focused = controller.focusedNode;
+        this.sidebarRows = controller.sidebarRows;
+
+        if (state.sidebarCollapsed !== lastCollapsed) {
+          lastCollapsed = state.sidebarCollapsed;
+          try {
+            localStorage.setItem(SIDEBAR_KEY, state.sidebarCollapsed ? "1" : "0");
+          } catch {
+            // Not being able to remember it is not a reason to fail the toggle.
+          }
+        }
       });
 
       // One listener for the whole app: the controller decides what a key means
@@ -233,6 +290,41 @@ Alpine.data("daybook", (): AppComponent => {
     },
     collectionName(id) {
       return this.state.allCollections.find((c) => c.id === id)?.name ?? "Collection";
+    },
+    collectionColor(hue) {
+      // "All" has no hue of its own and collections created before the engine
+      // assigned one carry an empty string, so both fall back to the accent.
+      return HUES[hue] ?? "var(--primary)";
+    },
+    collectionDotColor(id) {
+      // A row's dot and its sidebar entry must be the same colour, or the dot
+      // stops being a way to tell at a glance which collection a todo is in.
+      return this.collectionColor(
+        this.state.allCollections.find((c) => c.id === id)?.color ?? "",
+      );
+    },
+
+    // -- sidebar -------------------------------------------------------------
+
+    selectCollection(id) {
+      controller.setActiveCollection(id);
+    },
+    toggleSidebar() {
+      controller.setSidebarCollapsed(!this.state.sidebarCollapsed);
+    },
+    newCollection() {
+      // An inline field, not `window.prompt`: a native modal steals focus from
+      // the whole page and would be the one place in the app the keyboard model
+      // stops applying.
+      this.newCollectionOpen = true;
+    },
+    submitNewCollection() {
+      const name = this.newCollectionDraft.trim();
+      this.newCollectionDraft = "";
+      this.newCollectionOpen = false;
+      // No node id: filing the focused todo into a collection is what `c` does.
+      // Doing it here too would make "add a collection" quietly edit a todo.
+      if (name) void controller.createCollection(name);
     },
     paletteResults() {
       const q = this.paletteQuery.trim().toLowerCase();

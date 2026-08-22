@@ -39,6 +39,8 @@ export type Action =
   | "quick-add"
   | "yank"
   | "paste"
+  | "toggle-sidebar"
+  | "select-collection"
   | "clear"
   // --- EDIT mode ---
   | "newline"
@@ -118,8 +120,16 @@ function resolveList(k: KeyInput): Action | null {
     if (k.key === "n") return "quick-add";
     if (k.key === "z") return k.shiftKey ? "redo" : "undo";
     if (k.key === "y") return "redo";
+    // The editor claims `Ctrl/Cmd+B` for bold, but only inside itself — the host
+    // hands CodeMirror every key landing in `.cm-editor` before this resolver
+    // ever sees it, so there is no collision.
+    if (k.key === "b") return "toggle-sidebar";
     return null;
   }
+
+  // `1`…`9` pick the nth sidebar row, `1` being "All". Digits are otherwise
+  // unbound in LIST mode, so this costs no other verb.
+  if (k.key >= "1" && k.key <= "9") return "select-collection";
 
   switch (k.key) {
     case "ArrowDown":

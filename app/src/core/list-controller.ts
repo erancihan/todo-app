@@ -40,6 +40,10 @@ export interface ListState {
   allTags: TagView[];
   /** Every collection in the account, for the picker. */
   allCollections: CollectionView[];
+  /** Sidebar scope: `null` is "All", otherwise only that collection's items. */
+  activeCollectionId: string | null;
+  /** Whether the sidebar is down to its icon rail. */
+  sidebarCollapsed: boolean;
   /** First key of an in-flight sequence (`d` of `dd`), shown in the mode pill. */
   pendingKey: string | null;
   /** Id of the yanked node, if any — `P` pastes a copy of it. */
@@ -87,6 +91,8 @@ export class ListController {
     searchOpen: false,
     allTags: [],
     allCollections: [],
+    activeCollectionId: null,
+    sidebarCollapsed: false,
     pendingKey: null,
     yankedId: null,
     canUndo: false,
@@ -156,16 +162,25 @@ export class ListController {
       this.state.focusedId && nodes.some((n) => n.id === this.state.focusedId)
         ? this.state.focusedId
         : (nodes[0]?.id ?? null);
-    this.patch({ nodes, allTags, allCollections, focusedId });
+    // A scope pointing at a collection that no longer exists would filter the
+    // list down to nothing with no visible reason why.
+    const activeCollectionId = allCollections.some((c) => c.id === this.state.activeCollectionId)
+      ? this.state.activeCollectionId
+      : null;
+    this.patch({ nodes, allTags, allCollections, focusedId, activeCollectionId });
   }
 
   /**
-   * Rows currently visible: children of a collapsed node are hidden, and when a
-   * search is active only matches and their ancestors survive.
+   * Rows currently visible, narrowed in three independent steps: children of a
+   * collapsed node are hidden, the sidebar's collection scope is applied, and
+   * finally the `/` search. They compose — searching inside a collection means
+   * both, not one replacing the other.
    */
   get visible(): NodeView[] {
-    const collapsed = this.applyCollapse(this.state.nodes);
-    return this.state.query.trim() ? this.applyFilter(collapsed) : collapsed;
+    let rows = this.applyCollapse(this.state.nodes);
+    if (this.state.activeCollectionId) rows = this.applyCollectionScope(rows);
+    if (this.state.query.trim()) rows = this.applyFilter(rows);
+    return rows;
   }
 
   private applyCollapse(nodes: NodeView[]): NodeView[] {
@@ -189,13 +204,7 @@ export class ListController {
    * Dropping the ancestors would leave children floating at a depth with no
    * visible parent, which reads as corruption rather than as a filter.
    */
-  private applyFilter(nodes: NodeView[]): NodeView[] {
-    const q = this.state.query.trim().toLowerCase();
-    const matches = (n: NodeView) =>
-      n.title.toLowerCase().includes(q) ||
-      n.bodyMd.toLowerCase().includes(q) ||
-      n.tags.some((t) => t.name.toLowerCase().includes(q));
-
+  private keepWithAncestors(rows: NodeView[], matches: (n: NodeView) => boolean): NodeView[] {
     const keep = new Set<string>();
     const byId = new Map(this.state.nodes.map((n) => [n.id, n]));
     for (const node of this.state.nodes) {
@@ -207,7 +216,51 @@ export class ListController {
         parent = byId.get(parent)?.parentId ?? null;
       }
     }
-    return nodes.filter((n) => keep.has(n.id));
+    return rows.filter((n) => keep.has(n.id));
+  }
+
+  private applyFilter(nodes: NodeView[]): NodeView[] {
+    const q = this.state.query.trim().toLowerCase();
+    return this.keepWithAncestors(
+      nodes,
+      (n) =>
+        n.title.toLowerCase().includes(q) ||
+        n.bodyMd.toLowerCase().includes(q) ||
+        n.tags.some((t) => t.name.toLowerCase().includes(q)),
+    );
+  }
+
+  /**
+   * Narrow to one collection.
+   *
+   * Membership is per-node, not inherited, so a sub-item filed under "Work"
+   * shows even when its parent is not — with the parent kept for context, the
+   * same way search behaves.
+   */
+  private applyCollectionScope(nodes: NodeView[]): NodeView[] {
+    const id = this.state.activeCollectionId;
+    if (!id) return nodes;
+    return this.keepWithAncestors(nodes, (n) => n.collectionIds.includes(id));
+  }
+
+  /**
+   * Open (not done, not dropped) item counts per collection id, plus the total
+   * under the `ALL_SCOPE` key.
+   *
+   * Computed here rather than read from `CollectionView.nodeCount`, which counts
+   * every member including finished ones — a badge showing work left is the
+   * useful one, and the controller already holds the whole tree.
+   */
+  get openCounts(): Map<string | null, number> {
+    const counts = new Map<string | null, number>();
+    let all = 0;
+    for (const node of this.state.nodes) {
+      if (node.status === "done" || node.status === "dropped") continue;
+      all += 1;
+      for (const id of node.collectionIds) counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+    counts.set(null, all);
+    return counts;
   }
 
   private get focused(): NodeView | null {
@@ -224,6 +277,40 @@ export class ListController {
 
   focus(id: string) {
     this.patch({ focusedId: id });
+  }
+
+  // -- sidebar -------------------------------------------------------------
+
+  /** Scope the list to one collection, or to everything when given `null`. */
+  setActiveCollection(id: string | null) {
+    this.patch({ activeCollectionId: id });
+    // Focus follows the scope: leaving it on a row that just went out of view
+    // makes the next `j` jump somewhere unrelated.
+    const rows = this.visible;
+    if (!rows.some((n) => n.id === this.state.focusedId)) {
+      this.patch({ focusedId: rows[0]?.id ?? null });
+    }
+  }
+
+  setSidebarCollapsed(collapsed: boolean) {
+    this.patch({ sidebarCollapsed: collapsed });
+  }
+
+  /**
+   * The sidebar's rows, in the order the `1`…`9` shortcuts address them —
+   * "All" first, then the collections as the engine ordered them (by name).
+   */
+  get sidebarRows(): Array<{ id: string | null; name: string; color: string; count: number }> {
+    const counts = this.openCounts;
+    return [
+      { id: null, name: "All", color: "", count: counts.get(null) ?? 0 },
+      ...this.state.allCollections.map((c) => ({
+        id: c.id,
+        name: c.name,
+        color: c.color,
+        count: counts.get(c.id) ?? 0,
+      })),
+    ];
   }
 
   /** Run an engine call, refresh, and surface any failure instead of hiding it. */
@@ -269,12 +356,18 @@ export class ListController {
     const node = this.state.nodes.find((n) => n.id === id);
     if (!node) return;
 
+    // The active scope's collection does not count as content: `createInScope`
+    // put it there, the user did not. Counting it would make every capture made
+    // inside a collection un-discardable, bringing back the blank-row litter.
+    const scope = this.state.activeCollectionId;
+    const filedByHand = node.collectionIds.filter((id) => id !== scope);
+
     const empty =
       !node.title.trim() &&
       !node.bodyMd.trim() &&
       !node.hasChildren &&
       node.tags.length === 0 &&
-      node.collectionIds.length === 0 &&
+      filedByHand.length === 0 &&
       node.status !== "done";
     if (!empty) return;
 
@@ -287,6 +380,20 @@ export class ListController {
       await this.engine.deleteNode(id);
       this.state.focusedId = neighbour;
     });
+  }
+
+  /**
+   * Create a node, filed into the active collection scope.
+   *
+   * Without this, capturing while scoped to "Work" creates a node that is not in
+   * "Work" — so it vanishes from the list the instant it appears. Every creation
+   * verb goes through here for that reason.
+   */
+  private async createInScope(parentId: string | null, after: string | null): Promise<NodeView> {
+    const created = await this.engine.createNode(parentId, "", after);
+    const scope = this.state.activeCollectionId;
+    if (scope) await this.engine.addToCollection(created.id, scope);
+    return created;
   }
 
   private async saveBody(id: string): Promise<void> {
@@ -335,7 +442,7 @@ export class ListController {
     }
 
     await this.run(async () => {
-      const created = await this.engine.createNode(current?.parentId ?? null, "", id);
+      const created = await this.createInScope(current?.parentId ?? null, id);
       this.state.focusedId = created.id;
     });
     // Streak: the next line is already open and waiting.
@@ -369,7 +476,7 @@ export class ListController {
     if (action === "newline" || action === "caret-move") return false;
 
     if (shouldPreventDefault(action)) event.preventDefault();
-    void this.dispatch(action);
+    void this.dispatch(action, event.key);
     return true;
   }
 
@@ -388,7 +495,15 @@ export class ListController {
     if (this.state.pendingKey) this.patch({ pendingKey: null });
   }
 
-  async dispatch(action: Action): Promise<void> {
+  /**
+   * Run a verb.
+   *
+   * `arg` carries the raw key for the few actions that are a family rather than
+   * a single verb — today only `select-collection`, where `1`…`9` all resolve to
+   * the same action and the digit says which row. Widening [`Action`] into a
+   * payload-carrying union would touch every case for the sake of one.
+   */
+  async dispatch(action: Action, arg?: string): Promise<void> {
     const node = this.focused;
 
     switch (action) {
@@ -436,34 +551,34 @@ export class ListController {
           // After the *last* top-level row, not before the first. `n` was the one
           // creation verb that grew upward, so a capture streak came out in
           // reverse reading order while `o`, `a` and submit all went downward.
-          const last = this.state.nodes.filter((n) => n.parentId === null).at(-1) ?? null;
-          const created = await this.engine.createNode(null, "", last?.id ?? null);
+          // `?? null` on both sides of every parent comparison in this file: the
+          // wasm boundary is pinned to emit `null` (see `wasm.rs::to_js`), but a
+          // root read as `undefined` would make this filter quietly return
+          // nothing and put the capture at the top instead of the bottom.
+          const last = this.state.nodes.filter((n) => (n.parentId ?? null) === null).at(-1) ?? null;
+          const created = await this.createInScope(null, last?.id ?? null);
           this.state.focusedId = created.id;
         }).then(() => this.enterEdit(this.state.focusedId ?? undefined));
       case "new-sibling-below":
         return this.run(async () => {
-          const created = await this.engine.createNode(
-            node?.parentId ?? null,
-            "",
-            node?.id ?? null,
-          );
+          const created = await this.createInScope(node?.parentId ?? null, node?.id ?? null);
           this.state.focusedId = created.id;
         }).then(() => this.enterEdit(this.state.focusedId ?? undefined));
       case "new-sibling-above":
         return this.run(async () => {
           // "Above" means "before this one", i.e. after this node's predecessor.
           const siblings = this.state.nodes.filter(
-            (n) => n.parentId === (node?.parentId ?? null),
+            (n) => (n.parentId ?? null) === (node?.parentId ?? null),
           );
           const index = siblings.findIndex((n) => n.id === node?.id);
           const after = index > 0 ? siblings[index - 1]!.id : null;
-          const created = await this.engine.createNode(node?.parentId ?? null, "", after);
+          const created = await this.createInScope(node?.parentId ?? null, after);
           this.state.focusedId = created.id;
         }).then(() => this.enterEdit(this.state.focusedId ?? undefined));
       case "new-subitem":
         if (!node) return;
         return this.run(async () => {
-          const created = await this.engine.createNode(node.id, "", null);
+          const created = await this.createInScope(node.id, null);
           this.state.focusedId = created.id;
         }).then(() => this.enterEdit(this.state.focusedId ?? undefined));
 
@@ -562,6 +677,20 @@ export class ListController {
       // -- overlays
       case "focus-search":
         return this.patch({ searchOpen: true });
+
+      // -- sidebar
+      case "toggle-sidebar":
+        return this.setSidebarCollapsed(!this.state.sidebarCollapsed);
+      case "select-collection": {
+        // `arg` is the digit that was pressed; 1 addresses the first row ("All").
+        const index = Number(arg) - 1;
+        const row = this.sidebarRows[index];
+        // Out of range is a no-op, not a reset to "All": pressing `7` with three
+        // collections should do nothing rather than silently widen the scope.
+        if (!row) return;
+        return this.setActiveCollection(row.id);
+      }
+
       case "cheat-sheet":
         return this.patch({ cheatSheetOpen: !this.state.cheatSheetOpen });
       case "command-palette":

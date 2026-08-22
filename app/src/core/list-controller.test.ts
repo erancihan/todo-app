@@ -570,6 +570,163 @@ describe("creation order", () => {
   });
 });
 
+describe("collection sidebar", () => {
+  /** `root` and `child-a` are in Work; `second` is in Home. */
+  const SCOPED = [
+    node({ id: "root", hasChildren: true, collectionIds: ["work"] }),
+    node({ id: "child-a", parentId: "root", depth: 1, collectionIds: ["work"] }),
+    node({ id: "child-b", parentId: "root", depth: 1 }),
+    node({ id: "second", collectionIds: ["home"] }),
+  ];
+  const COLLECTIONS = [
+    { id: "work", name: "Work", parentId: null, color: "rose", icon: "", nodeCount: 2 },
+    { id: "home", name: "Home", parentId: null, color: "cyan", icon: "", nodeCount: 1 },
+  ];
+
+  function scoped(): { engine: EnginePort; controller: ListController } {
+    const engine = fakeEngine(SCOPED);
+    engine.listCollections = () => Promise.resolve(COLLECTIONS);
+    return { engine, controller: new ListController(engine, host) };
+  }
+
+  it("All shows everything", async () => {
+    const { controller } = scoped();
+    await controller.refresh();
+    expect(controller.visible).toHaveLength(4);
+  });
+
+  it("a scope keeps members and their ancestors", async () => {
+    const { controller } = scoped();
+    await controller.refresh();
+    controller.setActiveCollection("work");
+    expect(controller.visible.map((n) => n.id)).toEqual(["root", "child-a"]);
+  });
+
+  it("a scoped member drags in a parent that is not itself a member", async () => {
+    const { controller } = scoped();
+    await controller.refresh();
+    // `child-b` is not in Home, but `second` is — and `second` has no parent, so
+    // use a case where the parent really is absent from the collection.
+    const engine = fakeEngine([
+      node({ id: "p", hasChildren: true }),
+      node({ id: "c", parentId: "p", depth: 1, collectionIds: ["work"] }),
+    ]);
+    engine.listCollections = () => Promise.resolve(COLLECTIONS);
+    const c = new ListController(engine, host);
+    await c.refresh();
+    c.setActiveCollection("work");
+    expect(c.visible.map((n) => n.id)).toEqual(["p", "c"]);
+  });
+
+  it("the scope and the search compose", async () => {
+    const { controller } = scoped();
+    await controller.refresh();
+    controller.setActiveCollection("work");
+    controller.setQuery("child-a");
+    expect(controller.visible.map((n) => n.id)).toEqual(["root", "child-a"]);
+
+    controller.setQuery("second");
+    // `second` matches the search but is not in Work, so nothing survives both.
+    expect(controller.visible).toHaveLength(0);
+  });
+
+  it("focus follows the scope when the focused row goes out of view", async () => {
+    const { controller } = scoped();
+    await controller.refresh();
+    controller.focus("second");
+    controller.setActiveCollection("work");
+    expect(controller.snapshot.focusedId).toBe("root");
+  });
+
+  it("digits address the sidebar rows, 1 being All", async () => {
+    const { controller } = scoped();
+    await controller.refresh();
+
+    await controller.dispatch("select-collection", "2");
+    expect(controller.snapshot.activeCollectionId).toBe("work");
+
+    await controller.dispatch("select-collection", "1");
+    expect(controller.snapshot.activeCollectionId).toBeNull();
+  });
+
+  it("a digit past the last row is a no-op, not a reset", async () => {
+    const { controller } = scoped();
+    await controller.refresh();
+    await controller.dispatch("select-collection", "2");
+    await controller.dispatch("select-collection", "9");
+    expect(controller.snapshot.activeCollectionId).toBe("work");
+  });
+
+  it("counts only open items", async () => {
+    const engine = fakeEngine([
+      node({ id: "a", collectionIds: ["work"] }),
+      node({ id: "b", collectionIds: ["work"], status: "done" }),
+      node({ id: "c", collectionIds: ["work"], status: "dropped" }),
+    ]);
+    engine.listCollections = () => Promise.resolve(COLLECTIONS);
+    const controller = new ListController(engine, host);
+    await controller.refresh();
+
+    const rows = controller.sidebarRows;
+    expect(rows[0]).toMatchObject({ id: null, name: "All", count: 1 });
+    expect(rows[1]).toMatchObject({ id: "work", name: "Work", count: 1 });
+  });
+
+  it("a scope that no longer exists is dropped on refresh", async () => {
+    const { engine, controller } = scoped();
+    await controller.refresh();
+    controller.setActiveCollection("work");
+
+    engine.listCollections = () => Promise.resolve([COLLECTIONS[1]!]);
+    await controller.refresh();
+    expect(controller.snapshot.activeCollectionId).toBeNull();
+  });
+
+  it("creating inside a scope files the new node into it", async () => {
+    const { engine, controller } = scoped();
+    await controller.refresh();
+    controller.setActiveCollection("work");
+
+    await controller.dispatch("quick-add");
+    // Otherwise the new row is created and immediately filtered back out.
+    expect(engine.addToCollection).toHaveBeenCalledWith("new", "work");
+  });
+
+  it("the scope's own collection does not make a blank row un-discardable", async () => {
+    const engine = fakeEngine([node({ id: "blank", title: "", collectionIds: ["work"] })]);
+    engine.listCollections = () => Promise.resolve(COLLECTIONS);
+    const controller = new ListController(engine, host);
+    await controller.refresh();
+    controller.setActiveCollection("work");
+
+    controller.focus("blank");
+    controller.enterEdit("blank");
+    await controller.exitEdit();
+    expect(engine.deleteNode).toHaveBeenCalledWith("blank");
+  });
+
+  it("a hand-filed collection still counts as content", async () => {
+    const engine = fakeEngine([node({ id: "filed", title: "", collectionIds: ["home"] })]);
+    engine.listCollections = () => Promise.resolve(COLLECTIONS);
+    const controller = new ListController(engine, host);
+    await controller.refresh();
+    controller.setActiveCollection("work");
+
+    controller.focus("filed");
+    controller.enterEdit("filed");
+    await controller.exitEdit();
+    expect(engine.deleteNode).not.toHaveBeenCalled();
+  });
+
+  it("Ctrl+B toggles the rail", async () => {
+    const { controller } = scoped();
+    await controller.refresh();
+    expect(controller.snapshot.sidebarCollapsed).toBe(false);
+    await controller.dispatch("toggle-sidebar");
+    expect(controller.snapshot.sidebarCollapsed).toBe(true);
+  });
+});
+
 describe("error surfacing", () => {
   it("puts an engine failure into state rather than swallowing it", async () => {
     const engine = fakeEngine(TREE);
