@@ -37,6 +37,8 @@ export type Action =
   | "redo"
   | "focus-search"
   | "quick-add"
+  | "yank"
+  | "paste"
   | "clear"
   // --- EDIT mode ---
   | "newline"
@@ -46,7 +48,6 @@ export type Action =
   // --- Global ---
   | "command-palette"
   | "generate-report"
-  | "search"
   | "cheat-sheet";
 
 /**
@@ -88,7 +89,9 @@ function resolveGlobal(k: KeyInput): Action | null {
     return "generate-report";
   }
   if (primaryModifier(k) && k.key === "k") return "command-palette";
-  if (primaryModifier(k) && k.key === "f") return "search";
+  // Ctrl/Cmd+F and `/` are the same thing; the doc lists both so both resolve to
+  // the one action rather than a second, separately-implemented search.
+  if (primaryModifier(k) && k.key === "f") return "focus-search";
   return null;
 }
 
@@ -155,6 +158,10 @@ function resolveList(k: KeyInput): Action | null {
       return "open-collections";
     case "u":
       return "undo";
+    case "y":
+      return "yank";
+    case "P":
+      return "paste";
     case "/":
       return "focus-search";
     case "n":

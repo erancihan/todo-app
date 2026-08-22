@@ -50,19 +50,47 @@
             class="rounded-[var(--radius-sm)]"
             :class="isFocused(node.id) ? 'bg-muted shadow-[inset_2px_0_0_var(--primary)]' : ''"
           >
-            <div class="row-dense flex items-start gap-2" @click="onRowClick(node.id, $event)">
+            <div class="row-dense flex items-start gap-1.5" @click="onRowClick(node.id, $event)">
+              <!-- Disclosure chevron. Keeps its slot on leaves so titles stay
+                   aligned down the column. -->
+              <button
+                type="button"
+                class="mt-[2px] shrink-0 text-muted-foreground"
+                :class="node.hasChildren ? 'hover:text-foreground' : 'invisible'"
+                :aria-label="node.collapsed ? 'Expand' : 'Collapse'"
+                @click="toggleCollapse(node, $event)"
+              >
+                <svg
+                  viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                  stroke-linecap="round" stroke-linejoin="round"
+                  class="size-[12px] transition-transform duration-[120ms]"
+                  :style="node.collapsed ? '' : 'transform: rotate(90deg)'"
+                ><path d="m9 18 6-6-6-6" /></svg>
+              </button>
+
               <button
                 type="button"
                 class="mt-[3px] size-[14px] shrink-0 rounded-[3px] border"
                 :style="node.status === 'done'
                   ? 'background: var(--success); border-color: var(--success)'
-                  : 'border-color: var(--border)'"
+                  : 'border-color: color-mix(in oklch, var(--muted-foreground) 55%, transparent)'"
                 :aria-label="node.status === 'done' ? 'Mark not done' : 'Mark done'"
                 @click="toggleDone(node, $event)"
               ></button>
 
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2">
+                  <!-- Status dot for the states a checkbox cannot express.
+                       `todo` and `done` are already the checkbox, so they get no
+                       dot — otherwise every row carries redundant chrome. -->
+                  <span
+                    x-show="statusDot(node)"
+                    x-cloak
+                    class="size-[6px] shrink-0 rounded-full"
+                    :style="`background: ${statusDot(node)?.color}`"
+                    :title="statusDot(node)?.label"
+                  ></span>
+
                   <!-- `title` is derived from the body's first line by the engine,
                        with the markdown stripped — never rendered raw here. -->
                   <span
@@ -89,6 +117,30 @@
                       x-text="`#${tag.name}`"
                     ></span>
                   </template>
+
+                  <!-- Everything from here right is meta: pushed to the far edge
+                       so the title column stays scannable. -->
+                  <span class="ml-auto flex shrink-0 items-center gap-2">
+                    <!-- Collection dots: an item can be in several, so this is a
+                         row of dots rather than one badge. -->
+                    <span class="flex gap-[3px]" x-show="node.collectionIds.length" x-cloak>
+                      <template x-for="cid in node.collectionIds" :key="cid">
+                        <span
+                          class="size-[6px] rounded-full"
+                          style="background: var(--primary); opacity: 0.75"
+                          :title="collectionName(cid)"
+                        ></span>
+                      </template>
+                    </span>
+
+                    <!-- Sub-item rollup: done / total, only where there are children. -->
+                    <span
+                      x-show="node.hasChildren"
+                      x-cloak
+                      class="font-mono text-[0.625rem] text-muted-foreground"
+                      x-text="childCount(node)"
+                    ></span>
+                  </span>
                 </div>
 
                 <!-- The editor mounts here when this row is being edited. -->

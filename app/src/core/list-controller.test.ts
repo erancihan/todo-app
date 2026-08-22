@@ -43,6 +43,7 @@ function fakeEngine(tree: NodeView[]): EnginePort {
     promote: vi.fn(stub),
     demote: vi.fn(stub),
     restoreNode: vi.fn(() => Promise.resolve(1)),
+    duplicateNode: vi.fn(() => Promise.resolve(node({ id: "copy" }))),
     indent: vi.fn(stub),
     outdent: vi.fn(stub),
     moveNode: vi.fn(stub),
@@ -486,6 +487,86 @@ describe("undo / redo", () => {
     await controller.dispatch("undo");
     expect(spy("toggleDone")).toHaveBeenCalledTimes(2);
     expect(controller.snapshot.canUndo).toBe(false);
+  });
+});
+
+describe("yank / paste", () => {
+  let engine: EnginePort;
+  let controller: ListController;
+
+  beforeEach(async () => {
+    engine = fakeEngine(TREE);
+    controller = new ListController(engine, host);
+    await controller.refresh();
+  });
+
+  it("paste does nothing before anything is yanked", async () => {
+    await controller.dispatch("paste");
+    expect(engine.duplicateNode).not.toHaveBeenCalled();
+  });
+
+  it("y then P duplicates below the focused row", async () => {
+    controller.focus("child-a");
+    await controller.dispatch("yank");
+    expect(controller.snapshot.yankedId).toBe("child-a");
+
+    controller.focus("second");
+    await controller.dispatch("paste");
+    // Pasted as a sibling of the *focused* row, not of the yanked one.
+    expect(engine.duplicateNode).toHaveBeenCalledWith("child-a", null, "second");
+  });
+
+  it("the yank survives so it can be pasted more than once", async () => {
+    await controller.dispatch("yank");
+    await controller.dispatch("paste");
+    await controller.dispatch("paste");
+    expect(engine.duplicateNode).toHaveBeenCalledTimes(2);
+  });
+
+  it("a paste can be undone", async () => {
+    await controller.dispatch("yank");
+    await controller.dispatch("paste");
+    expect(controller.snapshot.canUndo).toBe(true);
+
+    await controller.dispatch("undo");
+    expect(engine.deleteNode).toHaveBeenCalled();
+  });
+});
+
+describe("creation order", () => {
+  it("quick-add appends after the last top-level row", async () => {
+    const engine = fakeEngine(TREE);
+    const controller = new ListController(engine, host);
+    await controller.refresh();
+
+    await controller.dispatch("quick-add");
+    // "second", not null: `n` grows downward like every other creation verb, so
+    // capturing three things in a row reads top-to-bottom in the order typed.
+    expect(engine.createNode).toHaveBeenCalledWith(null, "", "second");
+  });
+
+  it("quick-add on an empty list creates the first row", async () => {
+    const engine = fakeEngine([]);
+    const controller = new ListController(engine, host);
+    await controller.refresh();
+
+    await controller.dispatch("quick-add");
+    expect(engine.createNode).toHaveBeenCalledWith(null, "", null);
+  });
+
+  it("quick-add ignores children when picking the last row", async () => {
+    // `child-b` is the last node in the flat tree but it is nested; appending
+    // after it would silently make the new capture a sub-item.
+    const engine = fakeEngine([
+      node({ id: "root", hasChildren: true }),
+      node({ id: "child-a", parentId: "root", depth: 1 }),
+      node({ id: "child-b", parentId: "root", depth: 1 }),
+    ]);
+    const controller = new ListController(engine, host);
+    await controller.refresh();
+
+    await controller.dispatch("quick-add");
+    expect(engine.createNode).toHaveBeenCalledWith(null, "", "root");
   });
 });
 

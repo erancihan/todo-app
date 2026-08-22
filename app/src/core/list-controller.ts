@@ -42,6 +42,8 @@ export interface ListState {
   allCollections: CollectionView[];
   /** First key of an in-flight sequence (`d` of `dd`), shown in the mode pill. */
   pendingKey: string | null;
+  /** Id of the yanked node, if any — `P` pastes a copy of it. */
+  yankedId: string | null;
   canUndo: boolean;
   canRedo: boolean;
 }
@@ -86,6 +88,7 @@ export class ListController {
     allTags: [],
     allCollections: [],
     pendingKey: null,
+    yankedId: null,
     canUndo: false,
     canRedo: false,
   };
@@ -107,6 +110,9 @@ export class ListController {
    */
   private undoStack: UndoEntry[] = [];
   private redoStack: UndoEntry[] = [];
+
+  /** The yanked node id. Mirrored into state so the UI can show it. */
+  private yanked: string | null = null;
 
   private listeners = new Set<Listener>();
 
@@ -427,7 +433,11 @@ export class ListController {
       // -- creation
       case "quick-add":
         return this.run(async () => {
-          const created = await this.engine.createNode(null, "", null);
+          // After the *last* top-level row, not before the first. `n` was the one
+          // creation verb that grew upward, so a capture streak came out in
+          // reverse reading order while `o`, `a` and submit all went downward.
+          const last = this.state.nodes.filter((n) => n.parentId === null).at(-1) ?? null;
+          const created = await this.engine.createNode(null, "", last?.id ?? null);
           this.state.focusedId = created.id;
         }).then(() => this.enterEdit(this.state.focusedId ?? undefined));
       case "new-sibling-below":
@@ -514,6 +524,32 @@ export class ListController {
         return this.undo();
       case "redo":
         return this.redo();
+
+      // -- yank / paste
+      case "yank":
+        if (!node) return;
+        // Remembers the *id*, not a snapshot, so pasting copies the node as it
+        // stands now. Vim would paste the yanked text; here the useful reading of
+        // "copy this todo" is the live one.
+        this.yanked = node.id;
+        return this.patch({ yankedId: node.id });
+      case "paste": {
+        if (!this.yanked) return;
+        const source = this.yanked;
+        return this.run(async () => {
+          const copy = await this.engine.duplicateNode(
+            source,
+            node?.parentId ?? null,
+            node?.id ?? null,
+          );
+          this.state.focusedId = copy.id;
+          this.remember({
+            label: "paste",
+            undo: () => this.engine.deleteNode(copy.id),
+            redo: () => this.engine.restoreNode(copy.id),
+          });
+        });
+      }
 
       // -- the two axes
       case "open-tags":

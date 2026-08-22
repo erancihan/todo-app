@@ -83,6 +83,7 @@ export interface EnginePort {
   toggleDone(id: string): Promise<void>;
   promote(id: string): Promise<void>;
   demote(id: string): Promise<void>;
+  duplicateNode(id: string, newParent: string | null, after: string | null): Promise<NodeView>;
   restoreNode(id: string): Promise<number>;
   indent(id: string): Promise<void>;
   outdent(id: string): Promise<void>;
@@ -147,6 +148,9 @@ class TauriEnginePort implements EnginePort {
   }
   demote(id: string) {
     return this.invoke<void>("demote", { id });
+  }
+  duplicateNode(id: string, newParent: string | null, after: string | null) {
+    return this.invoke<NodeView>("duplicate_node", { id, newParent, after });
   }
   restoreNode(id: string) {
     return this.invoke<number>("restore_node", { id });
@@ -266,6 +270,9 @@ class WasmEnginePort implements EnginePort {
   }
   demote(id: string) {
     return this.call<void>("demote", id);
+  }
+  duplicateNode(id: string, newParent: string | null, after: string | null) {
+    return this.call<NodeView>("duplicateNode", id, newParent ?? undefined, after ?? undefined);
   }
   restoreNode(id: string) {
     return this.call<number>("restoreNode", id);

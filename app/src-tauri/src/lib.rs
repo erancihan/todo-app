@@ -131,6 +131,21 @@ fn promote(state: tauri::State<'_, AppState>, id: String) -> CmdResult<()> {
 }
 
 #[tauri::command]
+fn duplicate_node(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    new_parent: Option<String>,
+    after: Option<String>,
+) -> CmdResult<NodeView> {
+    state
+        .engine
+        .lock()
+        .unwrap()
+        .duplicate_node(&id, new_parent.as_deref(), after.as_deref())
+        .map_err(to_err)
+}
+
+#[tauri::command]
 fn demote(state: tauri::State<'_, AppState>, id: String) -> CmdResult<()> {
     state.engine.lock().unwrap().demote(&id).map_err(to_err)
 }
@@ -325,6 +340,7 @@ pub fn run() {
             toggle_done,
             promote,
             demote,
+            duplicate_node,
             restore_node,
             indent,
             outdent,

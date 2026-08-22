@@ -223,6 +223,22 @@ impl DaybookEngine {
         self.inner.borrow().promote(&id).map_err(err)
     }
 
+    #[wasm_bindgen(js_name = duplicateNode)]
+    pub fn duplicate_node(
+        &self,
+        id: String,
+        new_parent: Option<String>,
+        after: Option<String>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        to_js(
+            &self
+                .inner
+                .borrow()
+                .duplicate_node(&id, new_parent.as_deref(), after.as_deref())
+                .map_err(err)?,
+        )
+    }
+
     pub fn demote(&self, id: String) -> std::result::Result<(), JsValue> {
         self.inner.borrow().demote(&id).map_err(err)
     }

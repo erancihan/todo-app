@@ -583,6 +583,57 @@ impl<S: Store> Engine<S> {
         })
     }
 
+    /// Deep-copy a node and everything under it, placing the copy after `after`
+    /// among `new_parent`'s children.
+    ///
+    /// Backs `y`/`P` (yank and paste). The copy is a genuinely new node: fresh
+    /// ids, fresh `created` events, and a fresh `Y.Text` body seeded with the
+    /// original's *text* rather than its CRDT state.
+    ///
+    /// Seeding from text is not a correctness requirement — each node's body is
+    /// its own Yjs document, and Yjs only needs client ids unique *within* a
+    /// document, so two nodes may legitimately hold byte-identical state. It is a
+    /// hygiene choice: the copy starts with a clean, minimal history instead of
+    /// inheriting the original's edits and tombstones.
+    ///
+    /// Tags and collection memberships come along; completion does not — a pasted
+    /// copy is work still to do, not work already done.
+    pub fn duplicate_node(
+        &self,
+        id: &str,
+        new_parent: Option<&str>,
+        after: Option<&str>,
+    ) -> Result<NodeView> {
+        let Some(source) = self.node(id)? else {
+            return Err(CoreError::Store(format!("no such node: {id}")));
+        };
+
+        let copy = self.create_node(new_parent, &source.title, after)?;
+        if !source.body_md.is_empty() {
+            self.set_body(&copy.id, &source.body_md)?;
+        }
+        if source.promoted {
+            self.promote(&copy.id)?;
+        }
+        for tag in &source.tags {
+            self.add_tag(&copy.id, &tag.name)?;
+        }
+        for collection in &source.collection_ids {
+            self.add_to_collection(&copy.id, collection)?;
+        }
+
+        // Children in document order, each appended after the previous copy so
+        // the subtree keeps its shape.
+        let mut previous: Option<String> = None;
+        for (child, _) in self.sibling_keys(Some(id))? {
+            let child_copy = self.duplicate_node(&child, Some(&copy.id), previous.as_deref())?;
+            previous = Some(child_copy.id);
+        }
+
+        self.node(&copy.id)?
+            .ok_or_else(|| CoreError::Store("copy vanished after create".into()))
+    }
+
     /// Reverse a promotion.
     ///
     /// Discouraged in normal use — the data model says the event trail is the
@@ -1502,6 +1553,80 @@ mod tests {
             .filter(|t| *t == "promoted")
             .count();
         assert_eq!(promotions, 1);
+    }
+
+    #[test]
+    fn duplicate_copies_content_tags_and_collections() {
+        let e = engine();
+        let source = e.create_node(None, "", None).unwrap();
+        e.set_body(&source.id, "# Original\nwith a body").unwrap();
+        e.add_tag(&source.id, "urgent").unwrap();
+        let work = e.create_collection("Work", None).unwrap();
+        e.add_to_collection(&source.id, &work.id).unwrap();
+
+        let copy = e
+            .duplicate_node(&source.id, None, Some(&source.id))
+            .unwrap();
+
+        assert_ne!(copy.id, source.id, "duplicate reused the id");
+        assert_eq!(copy.title, "Original");
+        assert_eq!(copy.body_md, "# Original\nwith a body");
+        assert_eq!(copy.tags.len(), 1);
+        assert_eq!(copy.collection_ids, [work.id]);
+        assert_eq!(titles(&e), ["Original", "Original"]);
+    }
+
+    #[test]
+    fn duplicate_copies_the_whole_subtree() {
+        let e = engine();
+        let root = e.create_node(None, "root", None).unwrap();
+        let a = e.create_node(Some(&root.id), "a", None).unwrap();
+        e.create_node(Some(&root.id), "b", Some(&a.id)).unwrap();
+        e.create_node(Some(&a.id), "a1", None).unwrap();
+
+        e.duplicate_node(&root.id, None, Some(&root.id)).unwrap();
+
+        // The copy sits after the original and keeps the subtree's shape.
+        assert_eq!(titles(&e), ["root", "a", "a1", "b", "root", "a", "a1", "b"]);
+        let tree = e.list_tree().unwrap();
+        assert_eq!(tree[5].depth, 1, "copied child lost its depth");
+        assert_eq!(tree[6].depth, 2, "copied grandchild lost its depth");
+    }
+
+    #[test]
+    fn editing_a_duplicate_leaves_the_original_alone() {
+        // The property that actually matters. (The two bodies may hold identical
+        // CRDT *bytes* — that is fine, because each node's body is its own
+        // document and Yjs only needs client ids unique within one.)
+        let e = engine();
+        let source = e.create_node(None, "", None).unwrap();
+        e.set_body(&source.id, "shared text").unwrap();
+        let copy = e
+            .duplicate_node(&source.id, None, Some(&source.id))
+            .unwrap();
+        assert_eq!(copy.body_md, "shared text");
+
+        e.set_body(&copy.id, "diverged").unwrap();
+
+        assert_eq!(e.node(&copy.id).unwrap().unwrap().body_md, "diverged");
+        assert_eq!(
+            e.node(&source.id).unwrap().unwrap().body_md,
+            "shared text",
+            "editing the copy changed the original"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_of_a_done_node_starts_open() {
+        let e = engine();
+        let source = e.create_node(None, "done thing", None).unwrap();
+        e.toggle_done(&source.id).unwrap();
+
+        let copy = e
+            .duplicate_node(&source.id, None, Some(&source.id))
+            .unwrap();
+        assert_eq!(copy.status, Status::Todo);
+        assert!(copy.completed_at.is_none());
     }
 
     #[test]

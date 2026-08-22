@@ -12,7 +12,7 @@
 
 import { defaultKeymap, history, historyKeymap, insertNewlineAndIndent } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
-import { EditorState, type Extension } from "@codemirror/state";
+import { EditorSelection, EditorState, type Extension } from "@codemirror/state";
 import { EditorView, keymap, placeholder } from "@codemirror/view";
 import { livePreview } from "./live-preview";
 
@@ -27,6 +27,47 @@ export interface BodyEditorCallbacks {
 
 /** How long typing must pause before an autosave fires. */
 const AUTOSAVE_MS = 400;
+
+/**
+ * Wrap (or unwrap) each selection in a markdown marker — `Ctrl/Cmd+B` and `+I`.
+ *
+ * Toggling matters: pressing bold twice should give back the plain text, not
+ * `****text****`. With an empty selection it inserts the markers and puts the
+ * caret between them, so you can just start typing bold.
+ */
+function wrapSelection(view: EditorView, marker: string): boolean {
+  view.dispatch(
+    view.state.changeByRange((range) => {
+      const text = view.state.sliceDoc(range.from, range.to);
+      const width = marker.length;
+      const surrounding = view.state.sliceDoc(range.from - width, range.to + width);
+      const alreadyWrapped =
+        surrounding === `${marker}${text}${marker}` ||
+        (text.startsWith(marker) && text.endsWith(marker) && text.length > width * 2);
+
+      if (alreadyWrapped && text.startsWith(marker)) {
+        const inner = text.slice(width, -width);
+        return {
+          changes: { from: range.from, to: range.to, insert: inner },
+          range: EditorSelection.range(range.from, range.from + inner.length),
+        };
+      }
+      if (alreadyWrapped) {
+        return {
+          changes: { from: range.from - width, to: range.to + width, insert: text },
+          range: EditorSelection.range(range.from - width, range.to - width + text.length),
+        };
+      }
+      return {
+        changes: { from: range.from, to: range.to, insert: `${marker}${text}${marker}` },
+        range: text
+          ? EditorSelection.range(range.from + width, range.to + width)
+          : EditorSelection.cursor(range.from + width),
+      };
+    }),
+  );
+  return true;
+}
 
 export class BodyEditor {
   private view: EditorView;
@@ -62,6 +103,8 @@ export class BodyEditor {
         // promise, and on mobile it is what keeps the soft Return key safe.
         { key: "Enter", run: insertNewlineAndIndent },
         { key: "Shift-Enter", run: insertNewlineAndIndent },
+        { key: "Mod-b", run: (view) => wrapSelection(view, "**"), preventDefault: true },
+        { key: "Mod-i", run: (view) => wrapSelection(view, "*"), preventDefault: true },
         {
           key: "Escape",
           run: () => {

@@ -26,6 +26,10 @@ interface AppComponent {
   preview(node: NodeView): string;
   onRowClick(id: string, event: MouseEvent): void;
   toggleDone(node: NodeView, event: Event): void;
+  toggleCollapse(node: NodeView, event: Event): void;
+  statusDot(node: NodeView): { color: string; label: string } | null;
+  childCount(node: NodeView): string;
+  collectionName(id: string): string;
   paletteResults(): typeof PALETTE_COMMANDS;
   runCommand(id: string): void;
   cheatSheet: typeof CHEAT_SHEET;
@@ -106,6 +110,7 @@ Alpine.data("daybook", (): AppComponent => {
       allTags: [],
       allCollections: [],
       pendingKey: null,
+      yankedId: null,
       canUndo: false,
       canRedo: false,
     },
@@ -200,6 +205,34 @@ Alpine.data("daybook", (): AppComponent => {
       event.stopPropagation();
       controller.focus(node.id);
       void controller.dispatch("toggle-done");
+    },
+    toggleCollapse(node, event) {
+      event.stopPropagation();
+      if (!node.hasChildren) return;
+      controller.focus(node.id);
+      void controller.dispatch(node.collapsed ? "expand-or-child" : "collapse-or-parent");
+    },
+    statusDot(node) {
+      // Only the states the checkbox cannot express. `inbox` is the default a
+      // node is born in and means nothing yet, so it stays quiet too.
+      switch (node.status) {
+        case "in_progress":
+          return { color: "var(--warning)", label: "In progress" };
+        case "blocked":
+          return { color: "var(--destructive)", label: "Blocked" };
+        case "dropped":
+          return { color: "var(--muted-foreground)", label: "Dropped" };
+        default:
+          return null;
+      }
+    },
+    childCount(node) {
+      const children = this.state.nodes.filter((n) => n.parentId === node.id);
+      const done = children.filter((n) => n.status === "done").length;
+      return `${done}/${children.length}`;
+    },
+    collectionName(id) {
+      return this.state.allCollections.find((c) => c.id === id)?.name ?? "Collection";
     },
     paletteResults() {
       const q = this.paletteQuery.trim().toLowerCase();
