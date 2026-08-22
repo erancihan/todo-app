@@ -10,7 +10,7 @@
 import Alpine from "alpinejs";
 import "./app.css";
 import { BodyEditor } from "./core/body-editor";
-import { engine, isTauri, type NodeView } from "./core/engine-port";
+import { engine, isTauri, type NodeView, type Status } from "./core/engine-port";
 import { ListController, type ListState } from "./core/list-controller";
 import { CHEAT_SHEET, PALETTE_COMMANDS } from "./core/commands";
 
@@ -35,6 +35,21 @@ const HUES: Record<string, string> = {
 /** Where the sidebar's collapsed state is remembered between sessions. */
 const SIDEBAR_KEY = "daybook.sidebarCollapsed";
 
+/**
+ * The statuses the detail rail offers.
+ *
+ * `inbox` is deliberately absent: it is the state a node is born in and means
+ * "not yet triaged", so offering it as a destination would let you un-triage
+ * something, which is not a thing anyone wants to say.
+ */
+const STATUSES: Array<{ value: Status; label: string; color: string }> = [
+  { value: "todo", label: "Todo", color: "var(--muted-foreground)" },
+  { value: "in_progress", label: "In progress", color: "var(--warning)" },
+  { value: "blocked", label: "Blocked", color: "var(--destructive)" },
+  { value: "done", label: "Done", color: "var(--success)" },
+  { value: "dropped", label: "Dropped", color: "var(--muted-foreground)" },
+];
+
 interface AppComponent {
   state: ListState;
   visible: NodeView[];
@@ -46,10 +61,10 @@ interface AppComponent {
   isEditing(id: string): boolean;
   preview(node: NodeView): string;
   onRowClick(id: string, event: MouseEvent): void;
-  toggleDone(node: NodeView, event: Event): void;
+  toggleDone(node: NodeView | null, event: Event): void;
   toggleCollapse(node: NodeView, event: Event): void;
   statusDot(node: NodeView): { color: string; label: string } | null;
-  childCount(node: NodeView): string;
+  childCount(node: NodeView | null): string;
   collectionName(id: string): string;
   collectionColor(hue: string): string;
   collectionDotColor(id: string): string;
@@ -84,6 +99,24 @@ interface AppComponent {
   inCollection(collectionId: string): boolean;
   onQuery(value: string): void;
   closeOverlays(): void;
+  // -- detail view (Screen 3)
+  /** Mirrored reactively, like `focused`. */
+  detail: NodeView | null;
+  detailParent: NodeView | null;
+  openDetail(id?: string): void;
+  closeDetail(): void;
+  rowIndent(node: NodeView): number;
+  stamp(ms: number | null | undefined): string;
+  promoteFromDetail(node: NodeView, event: Event): void;
+  // The meta rail edits the *detail* node; `t` and `c` still act on the focused
+  // sub-item, so these cannot share the overlay handlers.
+  STATUSES: typeof STATUSES;
+  setStatus(status: Status): void;
+  detailInCollection(collectionId: string): boolean;
+  toggleDetailCollection(collectionId: string): void;
+  detailTagDraft: string;
+  submitDetailTag(): void;
+  dropDetailTag(tagId: string): void;
 }
 
 Alpine.data("daybook", (): AppComponent => {
@@ -126,6 +159,43 @@ Alpine.data("daybook", (): AppComponent => {
     mountedNodeId = nodeId;
   };
 
+  /**
+   * The DetailedTodoView's own body editor.
+   *
+   * A second instance, not the roving one: in the detail view focus is on a
+   * sub-item, so a shared editor would have to be dragged between the reading
+   * column and the checklist on every keystroke, and the main body — which is
+   * meant to be permanently live — would blink out each time.
+   */
+  let detailEditor: BodyEditor | null = null;
+  let detailMountedId: string | null = null;
+
+  const mountDetailEditor = (nodeId: string) => {
+    const slot = document.querySelector<HTMLElement>("[data-detail-body]");
+    if (!slot) return;
+
+    if (!detailEditor) {
+      detailEditor = new BodyEditor(slot, {
+        // Ctrl/Cmd+Enter here means "done writing", not "open another todo":
+        // there is no streak on this surface.
+        onSubmit: () => detailEditor?.flush(),
+        onExit: () => {
+          detailEditor?.flush();
+          (document.querySelector("[data-list]") as HTMLElement | null)?.focus();
+        },
+        onChange: (text) => controller.saveDetailBody(text),
+      });
+    } else if (detailEditor.element.parentElement !== slot) {
+      slot.appendChild(detailEditor.element);
+    }
+
+    if (detailMountedId !== nodeId) {
+      const node = controller.snapshot.nodes.find((n) => n.id === nodeId);
+      detailEditor.load(node?.bodyMd ?? "");
+      detailMountedId = nodeId;
+    }
+  };
+
   return {
     state: {
       mode: "list",
@@ -141,6 +211,7 @@ Alpine.data("daybook", (): AppComponent => {
       searchOpen: false,
       allTags: [],
       allCollections: [],
+      detailId: null,
       activeCollectionId: null,
       sidebarCollapsed: false,
       pendingKey: null,
@@ -155,6 +226,9 @@ Alpine.data("daybook", (): AppComponent => {
     tagDraft: "",
     collectionDraft: "",
     focused: null,
+    detail: null,
+    detailParent: null,
+    detailTagDraft: "",
     sidebarRows: [],
     newCollectionOpen: false,
     newCollectionDraft: "",
@@ -167,10 +241,31 @@ Alpine.data("daybook", (): AppComponent => {
           queueMicrotask(() => requestAnimationFrame(() => mountEditor(nodeId)));
         },
         closeEditor: () => {
-          editor?.flush();
+          // Only a *mounted* editor holds text worth saving. Flushing an
+          // unmounted one writes its stale document — typically the blank row it
+          // was last loaded with — straight over whatever row happens to be
+          // focused now, silently emptying a todo that was never opened. That is
+          // real data loss, and it fires on any path that closes the editor
+          // while the list has moved on.
+          if (mountedNodeId) {
+            editor?.flush();
+            mountedNodeId = null;
+          }
           (document.querySelector("[data-list]") as HTMLElement | null)?.focus();
         },
         editorText: () => editor?.text() ?? "",
+        openDetail: (nodeId) => {
+          // The reading column has to exist before the editor can move into it,
+          // and Alpine renders on the next tick.
+          queueMicrotask(() => requestAnimationFrame(() => mountDetailEditor(nodeId)));
+        },
+        closeDetail: () => {
+          // Same rule as `closeEditor`: an unmounted editor's text is stale.
+          if (detailMountedId) detailEditor?.flush();
+          // Forget the mount so re-opening reloads from the engine: the body may
+          // have been edited inline in the list while this view was closed.
+          detailMountedId = null;
+        },
       });
 
       // The sidebar starts where it was left. A collapsed rail that silently
@@ -187,6 +282,8 @@ Alpine.data("daybook", (): AppComponent => {
         this.state = state;
         this.visible = controller.visible;
         this.focused = controller.focusedNode;
+        this.detail = controller.detailNode;
+        this.detailParent = controller.detailParent;
         this.sidebarRows = controller.sidebarRows;
 
         if (state.sidebarCollapsed !== lastCollapsed) {
@@ -260,6 +357,7 @@ Alpine.data("daybook", (): AppComponent => {
     toggleDone(node, event) {
       // The checkbox is a mouse affordance for `x`; don't also open the editor.
       event.stopPropagation();
+      if (!node) return;
       controller.focus(node.id);
       void controller.dispatch("toggle-done");
     },
@@ -284,6 +382,9 @@ Alpine.data("daybook", (): AppComponent => {
       }
     },
     childCount(node) {
+      // Tolerates null: `x-show` gates *rendering*, not evaluation, so the
+      // detail header's binding still runs while no detail view is open.
+      if (!node) return "";
       const children = this.state.nodes.filter((n) => n.parentId === node.id);
       const done = children.filter((n) => n.status === "done").length;
       return `${done}/${children.length}`;
@@ -372,6 +473,58 @@ Alpine.data("daybook", (): AppComponent => {
     },
     closeOverlays() {
       controller.closeOverlays();
+    },
+
+    // -- detail view ---------------------------------------------------------
+
+    openDetail(id) {
+      controller.openDetail(id);
+    },
+    closeDetail() {
+      controller.closeDetail();
+    },
+    rowIndent(node) {
+      // The engine's depth is absolute. In the detail view the checklist indents
+      // relative to the todo being viewed, so its direct children sit flush left
+      // instead of starting three levels in.
+      if (!this.detail) return node.depth;
+      return Math.max(0, node.depth - this.detail.depth - 1);
+    },
+    stamp(ms) {
+      if (!ms) return "";
+      return new Date(ms).toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    },
+    promoteFromDetail(node, event) {
+      event.stopPropagation();
+      controller.focus(node.id);
+      void controller.dispatch("promote");
+    },
+
+    // -- detail meta rail ----------------------------------------------------
+
+    STATUSES,
+    setStatus(status) {
+      if (this.detail) void controller.setStatus(this.detail.id, status);
+    },
+    detailInCollection(collectionId) {
+      return this.detail?.collectionIds.includes(collectionId) ?? false;
+    },
+    toggleDetailCollection(collectionId) {
+      if (this.detail) void controller.toggleCollection(this.detail.id, collectionId);
+    },
+    submitDetailTag() {
+      const name = this.detailTagDraft.trim();
+      if (!name || !this.detail) return;
+      this.detailTagDraft = "";
+      void controller.addTag(this.detail.id, name);
+    },
+    dropDetailTag(tagId) {
+      if (this.detail) void controller.removeTag(this.detail.id, tagId);
     },
   };
 });

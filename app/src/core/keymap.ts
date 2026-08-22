@@ -41,6 +41,7 @@ export type Action =
   | "paste"
   | "toggle-sidebar"
   | "select-collection"
+  | "open-detail"
   | "clear"
   // --- EDIT mode ---
   | "newline"
@@ -162,6 +163,14 @@ function resolveList(k: KeyInput): Action | null {
       return "toggle-done";
     case "p":
       return "promote";
+    // **Deviation from docs/04 §6**, which has `Enter` open the DetailedTodoView
+    // for a promoted sub-item. That would make `Enter` mean "edit here" on one
+    // row and "navigate away" on the next, decided by a flag the user cannot see
+    // at a glance — and promoted items still need inline editing like any other.
+    // `v` (view) opens the detail surface for *any* node instead, so the rule is
+    // one key, one meaning, everywhere.
+    case "v":
+      return "open-detail";
     case "t":
       return "open-tags";
     case "c":

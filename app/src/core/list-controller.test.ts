@@ -61,7 +61,13 @@ function fakeEngine(tree: NodeView[]): EnginePort {
   } as unknown as EnginePort;
 }
 
-const host = { openEditor: vi.fn(), closeEditor: vi.fn(), editorText: () => "" };
+const host = {
+  openEditor: vi.fn(),
+  closeEditor: vi.fn(),
+  editorText: () => "",
+  openDetail: vi.fn(),
+  closeDetail: vi.fn(),
+};
 
 /** root, with two children, then a second root. */
 const TREE = [
@@ -567,6 +573,141 @@ describe("creation order", () => {
 
     await controller.dispatch("quick-add");
     expect(engine.createNode).toHaveBeenCalledWith(null, "", "root");
+  });
+});
+
+describe("detail view", () => {
+  /** `root` → `child-a` → `grandchild`, plus a sibling `child-b`, plus `second`. */
+  const DEEP = [
+    node({ id: "root", hasChildren: true }),
+    node({ id: "child-a", parentId: "root", depth: 1, hasChildren: true }),
+    node({ id: "grandchild", parentId: "child-a", depth: 2 }),
+    node({ id: "child-b", parentId: "root", depth: 1 }),
+    node({ id: "second" }),
+  ];
+
+  async function deep(): Promise<ListController> {
+    const c = new ListController(fakeEngine(DEEP), host);
+    await c.refresh();
+    return c;
+  }
+
+  beforeEach(() => {
+    host.openDetail.mockClear();
+    host.closeDetail.mockClear();
+  });
+
+  it("v narrows the list to the focused todo's whole subtree", async () => {
+    const c = await deep();
+    c.focus("root");
+    await c.dispatch("open-detail");
+    expect(c.snapshot.detailId).toBe("root");
+    expect(c.visible.map((n) => n.id)).toEqual(["child-a", "grandchild", "child-b"]);
+  });
+
+  it("focus lands on the first sub-item so j/k are useful straight away", async () => {
+    const c = await deep();
+    c.focus("root");
+    await c.dispatch("open-detail");
+    expect(c.snapshot.focusedId).toBe("child-a");
+
+    await c.dispatch("focus-next");
+    expect(c.snapshot.focusedId).toBe("grandchild");
+  });
+
+  it("a todo with no sub-items opens with nothing focused", async () => {
+    const c = await deep();
+    c.focus("second");
+    await c.dispatch("open-detail");
+    expect(c.snapshot.detailId).toBe("second");
+    expect(c.visible).toEqual([]);
+    expect(c.snapshot.focusedId).toBeNull();
+  });
+
+  it("exposes the node and its parent for the backlink chip", async () => {
+    const c = await deep();
+    c.openDetail("child-a");
+    expect(c.detailNode?.id).toBe("child-a");
+    expect(c.detailParent?.id).toBe("root");
+
+    c.openDetail("root");
+    expect(c.detailParent).toBeNull();
+  });
+
+  it("Esc leaves the detail view with that todo focused", async () => {
+    const c = await deep();
+    c.focus("root");
+    await c.dispatch("open-detail");
+    await c.dispatch("clear");
+    expect(c.snapshot.detailId).toBeNull();
+    expect(c.snapshot.focusedId).toBe("root");
+    expect(c.visible.map((n) => n.id)).toEqual(DEEP.map((n) => n.id));
+  });
+
+  it("Esc closes an overlay before it closes the detail view", async () => {
+    const c = await deep();
+    c.openDetail("root");
+    await c.dispatch("open-tags");
+    await c.dispatch("clear");
+    expect(c.snapshot.tagEditorOpen).toBe(false);
+    expect(c.snapshot.detailId).toBe("root");
+
+    await c.dispatch("clear");
+    expect(c.snapshot.detailId).toBeNull();
+  });
+
+  it("the host is told to flush before detailId moves", async () => {
+    const c = await deep();
+    c.openDetail("root");
+    host.closeDetail.mockClear();
+
+    c.openDetail("second");
+    // Navigating between todos must flush the first one's body while the
+    // controller still knows which todo that was.
+    expect(host.closeDetail).toHaveBeenCalled();
+    expect(c.snapshot.detailId).toBe("second");
+  });
+
+  it("saveDetailBody does nothing once the view is closed", async () => {
+    const engine = fakeEngine(DEEP);
+    const c = new ListController(engine, host);
+    await c.refresh();
+    c.focus("second");
+
+    // A late flush from an editor being torn down must not land on the row that
+    // now has focus.
+    c.saveDetailBody("stray text");
+    expect(engine.setBody).not.toHaveBeenCalled();
+  });
+
+  it("a deleted todo drops the detail view rather than showing a blank page", async () => {
+    const engine = fakeEngine(DEEP);
+    const c = new ListController(engine, host);
+    await c.refresh();
+    c.openDetail("root");
+
+    engine.listTree = () => Promise.resolve(DEEP.filter((n) => n.id !== "root"));
+    await c.refresh();
+    expect(c.snapshot.detailId).toBeNull();
+  });
+
+  it("opening a detail view on a node that is gone is a no-op", async () => {
+    const c = await deep();
+    c.openDetail("nope");
+    expect(c.snapshot.detailId).toBeNull();
+  });
+
+  it("setStatus reaches states x cannot, and is undoable", async () => {
+    const engine = fakeEngine(DEEP);
+    const c = new ListController(engine, host);
+    await c.refresh();
+
+    await c.setStatus("root", "blocked");
+    expect(engine.setStatus).toHaveBeenCalledWith("root", "blocked");
+    expect(c.snapshot.canUndo).toBe(true);
+
+    await c.dispatch("undo");
+    expect(engine.setStatus).toHaveBeenLastCalledWith("root", "todo");
   });
 });
 

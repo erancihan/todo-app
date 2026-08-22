@@ -126,7 +126,14 @@ export class BodyEditor {
       EditorView.theme(
         {
           "&": { backgroundColor: "transparent", color: "var(--foreground)", fontSize: "1rem" },
-          ".cm-content": { padding: "8px 0", caretColor: "var(--primary)" },
+          ".cm-content": {
+            padding: "8px 0",
+            caretColor: "var(--primary)",
+            // CodeMirror's base theme makes everything monospace — reasonable for
+            // a code editor, wrong for a notepad. Bodies are prose; `live-preview`
+            // puts code spans and fences back into `--font-mono`.
+            fontFamily: "var(--font-sans)",
+          },
           "&.cm-focused": { outline: "none" },
           ".cm-line": { padding: "0 2px" },
           ".cm-placeholder": { color: "var(--muted-foreground)" },

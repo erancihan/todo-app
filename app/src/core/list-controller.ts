@@ -12,7 +12,7 @@
  * is arranged to avoid.
  */
 
-import type { CollectionView, EnginePort, NodeView, TagView } from "./engine-port";
+import type { CollectionView, EnginePort, NodeView, Status, TagView } from "./engine-port";
 import { fromEvent, resolveKey, shouldPreventDefault, type Action, type Mode } from "./keymap";
 
 export interface ListState {
@@ -40,6 +40,14 @@ export interface ListState {
   allTags: TagView[];
   /** Every collection in the account, for the picker. */
   allCollections: CollectionView[];
+  /**
+   * The node whose DetailedTodoView is open, if any.
+   *
+   * Not a mode: LIST and EDIT still mean what they mean inside the detail view.
+   * This says *which surface* is rendering, and the list verbs work unchanged
+   * because [`visible`] narrows to the node's sub-items while it is set.
+   */
+  detailId: string | null;
   /** Sidebar scope: `null` is "All", otherwise only that collection's items. */
   activeCollectionId: string | null;
   /** Whether the sidebar is down to its icon rail. */
@@ -74,6 +82,14 @@ export interface ListHost {
   closeEditor(): void;
   /** Read the editor's current text — used when submitting. */
   editorText(): string;
+  /**
+   * The DetailedTodoView opened on this node: mount the body editor into its
+   * reading column. The detail body is always live rather than a rendered
+   * preview with an edit toggle — see the note on `openDetail`.
+   */
+  openDetail(nodeId: string): void;
+  /** Leaving the detail view: flush its editor while `detailId` still points at it. */
+  closeDetail(): void;
 }
 
 export class ListController {
@@ -91,6 +107,7 @@ export class ListController {
     searchOpen: false,
     allTags: [],
     allCollections: [],
+    detailId: null,
     activeCollectionId: null,
     sidebarCollapsed: false,
     pendingKey: null,
@@ -167,7 +184,10 @@ export class ListController {
     const activeCollectionId = allCollections.some((c) => c.id === this.state.activeCollectionId)
       ? this.state.activeCollectionId
       : null;
-    this.patch({ nodes, allTags, allCollections, focusedId, activeCollectionId });
+    // Same for a detail view whose todo was deleted — it would render an empty
+    // page with no way back except Esc.
+    const detailId = nodes.some((n) => n.id === this.state.detailId) ? this.state.detailId : null;
+    this.patch({ nodes, allTags, allCollections, focusedId, activeCollectionId, detailId });
   }
 
   /**
@@ -175,12 +195,42 @@ export class ListController {
    * collapsed node are hidden, the sidebar's collection scope is applied, and
    * finally the `/` search. They compose — searching inside a collection means
    * both, not one replacing the other.
+   *
+   * In the detail view this is the open node's sub-items instead. That is the
+   * whole trick behind that screen: `j`, `x`, `a`, `p` and `dd` are not
+   * reimplemented there, they act on whatever `visible` currently means.
    */
   get visible(): NodeView[] {
+    if (this.state.detailId) return this.applyCollapse(this.subtreeOf(this.state.detailId));
+
     let rows = this.applyCollapse(this.state.nodes);
     if (this.state.activeCollectionId) rows = this.applyCollectionScope(rows);
     if (this.state.query.trim()) rows = this.applyFilter(rows);
     return rows;
+  }
+
+  /** Every descendant of `id`, in tree order, excluding `id` itself. */
+  private subtreeOf(id: string): NodeView[] {
+    const nodes = this.state.nodes;
+    const start = nodes.findIndex((n) => n.id === id);
+    if (start === -1) return [];
+    const rootDepth = nodes[start]!.depth;
+    const out: NodeView[] = [];
+    for (let i = start + 1; i < nodes.length && nodes[i]!.depth > rootDepth; i += 1) {
+      out.push(nodes[i]!);
+    }
+    return out;
+  }
+
+  /** The node whose detail view is open, or null. */
+  get detailNode(): NodeView | null {
+    return this.state.nodes.find((n) => n.id === this.state.detailId) ?? null;
+  }
+
+  /** The detail node's parent, for the backlink chip (docs/04 §6). */
+  get detailParent(): NodeView | null {
+    const parent = this.detailNode?.parentId;
+    return parent ? (this.state.nodes.find((n) => n.id === parent) ?? null) : null;
   }
 
   private applyCollapse(nodes: NodeView[]): NodeView[] {
@@ -277,6 +327,37 @@ export class ListController {
 
   focus(id: string) {
     this.patch({ focusedId: id });
+  }
+
+  // -- detail view ---------------------------------------------------------
+
+  /**
+   * Open the DetailedTodoView for a node (docs/04 §8, Screen 3).
+   *
+   * Focus moves to the first sub-item so `j`/`k` are immediately useful; with no
+   * sub-items there is nothing in the checklist to focus and it goes null, which
+   * every verb already tolerates.
+   */
+  openDetail(id?: string) {
+    const target = id ?? this.state.focusedId;
+    if (!target || !this.state.nodes.some((n) => n.id === target)) return;
+    // Flush *before* `detailId` moves. `saveDetailBody` reads it live, so
+    // flushing afterwards would file the old todo's text under the new one.
+    this.host.closeEditor();
+    if (this.state.detailId) this.host.closeDetail();
+
+    this.patch({ detailId: target, mode: "list" });
+    this.patch({ focusedId: this.visible[0]?.id ?? null });
+    this.host.openDetail(target);
+  }
+
+  /** Back to the list, with the node you were looking at focused. */
+  closeDetail() {
+    const wasOpen = this.state.detailId;
+    if (!wasOpen) return;
+    this.host.closeEditor();
+    this.host.closeDetail();
+    this.patch({ detailId: null, mode: "list", focusedId: wasOpen });
   }
 
   // -- sidebar -------------------------------------------------------------
@@ -419,6 +500,23 @@ export class ListController {
   /** Autosave hook for the editor — always writes to whatever row has focus. */
   saveFocusedBody(text: string): void {
     void this.saveBodyText(null, text);
+  }
+
+  /**
+   * Autosave hook for the detail view's own editor.
+   *
+   * It cannot share `saveFocusedBody`: inside the detail view focus is on a
+   * *sub-item*, so routing the main body through it would file the todo's body
+   * into whichever child happened to be highlighted. Reads `detailId` live for
+   * the same reason `saveFocusedBody` reads `focusedId` live — a callback that
+   * captured the id would keep writing to the first todo ever opened.
+   */
+  saveDetailBody(text: string): void {
+    // No open detail means a late flush from an editor that is being torn down.
+    // Falling through to `saveBodyText`'s focused-row default would write the
+    // body of the todo you just left into the row you just landed on.
+    if (!this.state.detailId) return;
+    void this.saveBodyText(this.state.detailId, text);
   }
 
   /**
@@ -678,7 +776,9 @@ export class ListController {
       case "focus-search":
         return this.patch({ searchOpen: true });
 
-      // -- sidebar
+      // -- surfaces
+      case "open-detail":
+        return this.openDetail();
       case "toggle-sidebar":
         return this.setSidebarCollapsed(!this.state.sidebarCollapsed);
       case "select-collection": {
@@ -710,11 +810,12 @@ export class ListController {
         if (this.state.query || this.state.searchOpen) {
           return this.patch({ query: "", searchOpen: false });
         }
+        if (this.state.detailId) return this.closeDetail();
         return this.patch({ error: null });
 
       default:
-        // Still unwired: undo/redo and yank/paste. Deliberately inert rather
-        // than silently wrong.
+        // Every action is wired. A `never` here would be nicer, but the union is
+        // shared with the palette, which dispatches by string id.
         return;
     }
   }
@@ -723,6 +824,27 @@ export class ListController {
 
   async setTitle(id: string, title: string): Promise<void> {
     return this.run(() => this.engine.setTitle(id, title));
+  }
+
+  /**
+   * Set an explicit status.
+   *
+   * `x` only ever swings between `todo` and `done`, so until the detail view's
+   * meta rail there was no way to reach `in_progress`, `blocked` or `dropped`
+   * from the UI at all — the engine supported them and nothing offered them.
+   */
+  async setStatus(id: string, status: Status): Promise<void> {
+    const node = this.state.nodes.find((n) => n.id === id);
+    const previous = node?.status;
+    if (previous && previous !== status) {
+      this.remember({
+        label: "status",
+        focusId: id,
+        undo: () => this.engine.setStatus(id, previous),
+        redo: () => this.engine.setStatus(id, status),
+      });
+    }
+    return this.run(() => this.engine.setStatus(id, status));
   }
 
   async addTag(id: string, name: string): Promise<void> {

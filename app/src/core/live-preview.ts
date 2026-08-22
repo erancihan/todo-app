@@ -54,6 +54,8 @@ const STYLED: Record<string, string> = {
   Emphasis: "cm-md-em",
   StrongEmphasis: "cm-md-strong",
   InlineCode: "cm-md-code",
+  FencedCode: "cm-md-fence",
+  CodeBlock: "cm-md-fence",
   Strikethrough: "cm-md-strike",
   Blockquote: "cm-md-quote",
   URL: "cm-md-url",
@@ -154,6 +156,16 @@ const livePreviewTheme = EditorView.theme({
     background: "var(--muted)",
     borderRadius: "3px",
     padding: "0.05em 0.3em",
+  },
+  // Fences stay monospace even though bodies are prose (docs/04 §8, Screen 2).
+  ".cm-md-fence": {
+    fontFamily: "var(--font-mono)",
+    fontSize: "0.9em",
+    background: "var(--muted)",
+    borderRadius: "var(--radius-sm)",
+    display: "inline-block",
+    width: "100%",
+    padding: "0.2em 0.5em",
   },
   ".cm-md-quote": {
     color: "var(--muted-foreground)",

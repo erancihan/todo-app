@@ -44,6 +44,14 @@ function check(name, passed, detail = "") {
   console.log(`  ${passed ? "PASS" : "FAIL"}  ${name}${detail && !passed ? `\n        ${detail}` : ""}`);
 }
 
+/** Read a node's stored body straight from the engine's tree, by tree position. */
+function nodeBody(page, index) {
+  return page.evaluate(
+    (i) => window.Alpine.$data(document.getElementById("app")).state.nodes[i]?.bodyMd ?? "",
+    index,
+  );
+}
+
 async function waitForServer(url, timeoutMs = 90_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -214,6 +222,36 @@ try {
   check("Ctrl+K opens the command palette", paletteVisible);
   await page.keyboard.press("Escape");
   await page.waitForTimeout(300);
+
+  // --- the detail view ----------------------------------------------------
+  await page.keyboard.press("g");
+  await page.keyboard.press("g");
+  await page.waitForTimeout(300);
+  const bodyBeforeDetail = await nodeBody(page, 0);
+  await page.keyboard.press("v");
+  await page.waitForTimeout(900);
+
+  const detail = await page.evaluate(() => {
+    const d = window.Alpine.$data(document.getElementById("app"));
+    return { id: d.state.detailId, title: d.detail?.title, subItems: d.rows().length };
+  });
+  check("v opens the detail view on the focused todo", Boolean(detail.id), JSON.stringify(detail));
+  check(
+    "the detail body editor is mounted",
+    await page.locator("[data-detail-body] .cm-content").isVisible(),
+  );
+
+  // The regression that matters here: closing the roving editor while the list
+  // has moved on used to flush its *stale* document over the focused row,
+  // emptying a todo nobody had opened.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(800);
+  const bodyAfterDetail = await nodeBody(page, 0);
+  check(
+    "opening and leaving the detail view does not blank the body",
+    bodyAfterDetail === bodyBeforeDetail && bodyAfterDetail.length > 0,
+    `${JSON.stringify(bodyBeforeDetail)} → ${JSON.stringify(bodyAfterDetail)}`,
+  );
 
   // --- durability: reload and confirm OPFS kept everything ---------------
   const before = await page.locator("li[role=treeitem]").count();
