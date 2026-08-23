@@ -12,7 +12,15 @@
  * is arranged to avoid.
  */
 
-import type { CollectionView, EnginePort, NodeView, Status, TagView } from "./engine-port";
+import type {
+  CollectionView,
+  EnginePort,
+  Grouping,
+  NodeView,
+  Report,
+  Status,
+  TagView,
+} from "./engine-port";
 import { fromEvent, resolveKey, shouldPreventDefault, type Action, type Mode } from "./keymap";
 
 export interface ListState {
@@ -48,6 +56,11 @@ export interface ListState {
    * because [`visible`] narrows to the node's sub-items while it is set.
    */
   detailId: string | null;
+  /** The EOD report, once generated. `null` means the view is closed. */
+  report: Report | null;
+  /** Which local day the open report covers, as `YYYY-MM-DD`. */
+  reportDay: string;
+  reportGrouping: Grouping;
   /** Sidebar scope: `null` is "All", otherwise only that collection's items. */
   activeCollectionId: string | null;
   /** Whether the sidebar is down to its icon rail. */
@@ -108,6 +121,9 @@ export class ListController {
     allTags: [],
     allCollections: [],
     detailId: null,
+    report: null,
+    reportDay: "",
+    reportGrouping: "collection",
     activeCollectionId: null,
     sidebarCollapsed: false,
     pendingKey: null,
@@ -358,6 +374,69 @@ export class ListController {
     this.host.closeEditor();
     this.host.closeDetail();
     this.patch({ detailId: null, mode: "list", focusedId: wasOpen });
+  }
+
+  // -- EOD report ----------------------------------------------------------
+
+  /**
+   * Generate the report for a local day and open the view.
+   *
+   * The window is computed here, in the host, because this is the only side that
+   * knows the viewer's timezone — including DST, which is why the offset is read
+   * from the *day being reported on* rather than from now. Core takes the window
+   * as given (docs/03 §9).
+   */
+  async openReport(day?: string, grouping?: Grouping): Promise<void> {
+    const dayKey = day ?? localDayKey(new Date());
+    const groupBy = grouping ?? this.state.reportGrouping;
+
+    const start = new Date(`${dayKey}T00:00:00`);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+    // `getTimezoneOffset` is minutes to ADD to local to reach UTC, so it is the
+    // negation of what the report wants.
+    const tzOffsetMinutes = -start.getTimezoneOffset();
+
+    this.host.closeEditor();
+    if (this.state.detailId) this.host.closeDetail();
+
+    await this.run(async () => {
+      const report = await this.engine.generateReport({
+        fromMs: start.getTime(),
+        toMs: end.getTime(),
+        tzOffsetMinutes,
+        dateLabel: dayKey,
+        groupBy,
+        dedup: false,
+        carryOverWindowDays: 7,
+      });
+      // Only today's report writes. Browsing back through history is reading,
+      // and letting it append `carried_over` events would inflate every stale
+      // item's slipped count a little more each time someone scrolled through
+      // last week. `slippedDays` therefore means "how many daily reports have
+      // carried this forward", not "how many calendar days it has been open" —
+      // a day you never opened Daybook does not count against you.
+      if (report.carriedOverIds.length > 0 && dayKey === localDayKey(new Date())) {
+        await this.engine.commitCarryOver(report.carriedOverIds, dayKey);
+      }
+      this.state.report = report;
+      this.state.reportDay = dayKey;
+      this.state.reportGrouping = groupBy;
+      this.state.detailId = null;
+      this.state.mode = "list";
+    });
+  }
+
+  closeReport() {
+    if (this.state.report) this.patch({ report: null });
+  }
+
+  /** Step the reported day by `days`, keeping the view open. */
+  async shiftReportDay(days: number): Promise<void> {
+    if (!this.state.reportDay) return;
+    const date = new Date(`${this.state.reportDay}T00:00:00`);
+    date.setDate(date.getDate() + days);
+    await this.openReport(localDayKey(date));
   }
 
   // -- sidebar -------------------------------------------------------------
@@ -777,6 +856,10 @@ export class ListController {
         return this.patch({ searchOpen: true });
 
       // -- surfaces
+      case "generate-report":
+        // A toggle: the same chord that opens it puts it away.
+        if (this.state.report) return this.closeReport();
+        return this.openReport();
       case "open-detail":
         return this.openDetail();
       case "toggle-sidebar":
@@ -810,6 +893,7 @@ export class ListController {
         if (this.state.query || this.state.searchOpen) {
           return this.patch({ query: "", searchOpen: false });
         }
+        if (this.state.report) return this.closeReport();
         if (this.state.detailId) return this.closeDetail();
         return this.patch({ error: null });
 
@@ -930,4 +1014,16 @@ export class ListController {
   get focusedNode(): NodeView | null {
     return this.focused;
   }
+}
+
+/**
+ * `YYYY-MM-DD` for a Date in the *local* timezone.
+ *
+ * Not `toISOString().slice(0, 10)`: that converts to UTC first, so anyone east
+ * of Greenwich in the evening — or west of it in the morning — would get
+ * yesterday's or tomorrow's report without being told.
+ */
+export function localDayKey(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }

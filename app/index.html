@@ -129,7 +129,7 @@
             x-text="state.error"
           ></div>
 
-          <div class="flex flex-col gap-8 lg:flex-row">
+          <div x-show="!state.report" class="flex flex-col gap-8 lg:flex-row">
             <!-- The reading column. In the detail view it narrows to the 760px
                  the doc specifies; the list keeps the container's full width. -->
             <div class="min-w-0 flex-1" :class="state.detailId ? 'max-w-[760px]' : ''">
@@ -414,6 +414,7 @@
               ><kbd class="font-mono">v</kbd> open detail</span
             >
             <span x-show="state.detailId"><kbd class="font-mono">Esc</kbd> back to the list</span>
+            · <kbd class="font-mono">Ctrl/Cmd+Shift+E</kbd> EOD report
           </footer>
 
             </div>
@@ -517,6 +518,165 @@
               </div>
             </aside>
           </div>
+
+          <!-- EODReportView (docs/04 §8, Screen 4) — the hero screen. Generous
+               whitespace on purpose: a deliberate contrast to the dense list,
+               and it has to survive being printed or pasted into Slack. -->
+          <section x-show="state.report" x-cloak class="report">
+            <div class="mb-6 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                class="rounded-[var(--radius-sm)] px-1.5 py-1 text-[0.75rem] text-muted-foreground hover:bg-muted hover:text-foreground"
+                @click="closeReport()"
+              >
+                ← Back to the list
+              </button>
+
+              <span class="ml-auto flex items-center gap-1">
+                <button
+                  type="button"
+                  class="rounded-[var(--radius-sm)] px-2 py-1 font-mono text-[0.75rem] text-muted-foreground hover:bg-muted hover:text-foreground"
+                  aria-label="Previous day"
+                  @click="shiftReportDay(-1)"
+                >
+                  ‹
+                </button>
+                <span class="font-mono text-[0.75rem]" x-text="state.reportDay"></span>
+                <!-- No stepping past today: a report for tomorrow would be a
+                     blank page and a carry-over roll into the future. -->
+                <button
+                  type="button"
+                  class="rounded-[var(--radius-sm)] px-2 py-1 font-mono text-[0.75rem] text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-30"
+                  aria-label="Next day"
+                  :disabled="reportIsToday()"
+                  @click="shiftReportDay(1)"
+                >
+                  ›
+                </button>
+              </span>
+
+              <span class="flex items-center gap-1">
+                <template x-for="g in GROUPINGS" :key="g.value">
+                  <button
+                    type="button"
+                    class="rounded-[var(--radius-sm)] border px-1.5 py-0.5 text-[0.6875rem]"
+                    :style="state.reportGrouping === g.value
+                      ? 'border-color: var(--primary); color: var(--primary)'
+                      : 'border-color: var(--border); color: var(--muted-foreground)'"
+                    @click="setReportGrouping(g.value)"
+                    x-text="g.label"
+                  ></button>
+                </template>
+              </span>
+
+              <button
+                type="button"
+                class="rounded-[var(--radius-sm)] border px-2 py-1 text-[0.75rem]"
+                style="border-color: var(--primary); color: var(--primary)"
+                @click="copyReport()"
+              >
+                Copy as markdown
+              </button>
+            </div>
+
+            <h2 class="text-[1.75rem] leading-tight font-[590] tracking-[-0.02em]">
+              <span x-text="state.report?.title"></span>
+            </h2>
+
+            <p class="mt-2 font-mono text-[0.75rem] text-muted-foreground">
+              <span x-text="`Created ${state.report?.counts.created ?? 0}`"></span> ·
+              <span x-text="`Updated ${state.report?.counts.updated ?? 0}`"></span> ·
+              <span x-text="`Completed ${state.report?.counts.completed ?? 0}`"></span> ·
+              <span x-text="`Carried over ${state.report?.counts.carriedOver ?? 0}`"></span>
+            </p>
+
+            <template x-for="section in state.report?.sections ?? []" :key="section.heading">
+              <div class="mt-8" x-show="section.items.length">
+                <h3
+                  x-show="section.heading"
+                  class="mb-3 border-b pb-1 text-[1rem] font-[590]"
+                  style="border-color: var(--border)"
+                  x-text="section.heading"
+                ></h3>
+                <ul class="flex flex-col gap-1.5">
+                  <template x-for="item in section.items" :key="item.nodeId + section.heading">
+                    <li
+                      class="flex items-baseline gap-2 text-[0.875rem] leading-relaxed"
+                      :style="`margin-left: ${item.depth * 22}px`"
+                    >
+                      <span
+                        class="font-mono text-[0.8125rem]"
+                        :style="item.status === 'done' ? 'color: var(--success)' : 'color: var(--muted-foreground)'"
+                        x-text="item.status === 'done' ? '[x]' : '[ ]'"
+                      ></span>
+                      <span class="min-w-0">
+                        <span
+                          :class="reportItemClasses(item) + (item.depth === 0 ? ' font-[560]' : '')"
+                          x-text="item.title || 'Untitled'"
+                        ></span>
+                        <template x-for="tag in item.tags" :key="tag">
+                          <span
+                            class="ml-1.5 rounded-full px-1.5 py-px text-[0.6875rem]"
+                            :class="`tag-${tagColor(tag)}`"
+                            x-text="`#${tag}`"
+                          ></span>
+                        </template>
+                        <span
+                          x-show="item.completedMs && item.bucket === 'completed'"
+                          x-cloak
+                          class="ml-1.5 font-mono text-[0.6875rem] text-muted-foreground"
+                          x-text="`done ${clockTime(item.completedMs)}`"
+                        ></span>
+                        <span
+                          x-show="item.dueMs"
+                          x-cloak
+                          class="ml-1.5 font-mono text-[0.6875rem] text-muted-foreground"
+                          x-text="`due ${clockTime(item.dueMs)}`"
+                        ></span>
+                        <em
+                          x-show="reportAnnotation(item)"
+                          x-cloak
+                          class="ml-1.5 text-[0.75rem] text-muted-foreground"
+                          x-text="reportAnnotation(item)"
+                        ></em>
+                      </span>
+                    </li>
+                  </template>
+                </ul>
+              </div>
+            </template>
+
+            <p
+              x-show="!state.report?.sections.length"
+              x-cloak
+              class="mt-8 text-[0.875rem] text-muted-foreground"
+            >
+              Nothing recorded on this day.
+            </p>
+
+            <p
+              x-show="state.report?.duplicated"
+              x-cloak
+              class="mt-8 text-[0.75rem] text-muted-foreground italic"
+            >
+              Items in several collections are listed under each; totals count memberships.
+            </p>
+          </section>
+
+          <!-- Toast. One at a time by design — a second replaces the first,
+               because stacking confirmations turns reassurance into a wall. -->
+          <div
+            x-show="toastMessage"
+            x-cloak
+            class="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-[var(--radius)] border px-3 py-2 text-[0.8125rem] shadow-lg"
+            :style="toastMessage?.kind === 'error'
+              ? 'border-color: var(--destructive); color: var(--destructive); background: var(--card)'
+              : 'border-color: var(--border); background: var(--card)'"
+            role="status"
+            aria-live="polite"
+            @click="dismissToast()"
+            x-text="toastMessage?.text"
+          ></div>
 
           <!-- Mode pill: vim-style modality, but legible (docs §3). -->
           <div

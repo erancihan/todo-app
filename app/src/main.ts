@@ -10,9 +10,17 @@
 import Alpine from "alpinejs";
 import "./app.css";
 import { BodyEditor } from "./core/body-editor";
-import { engine, isTauri, type NodeView, type Status } from "./core/engine-port";
-import { ListController, type ListState } from "./core/list-controller";
+import {
+  engine,
+  isTauri,
+  type Grouping,
+  type NodeView,
+  type ReportItem,
+  type Status,
+} from "./core/engine-port";
+import { ListController, localDayKey, type ListState } from "./core/list-controller";
 import { CHEAT_SHEET, PALETTE_COMMANDS } from "./core/commands";
+import { dismissToast, subscribeToasts, toast, type ToastMessage } from "./core/toast";
 
 type SidebarRow = ListController["sidebarRows"][number];
 
@@ -31,6 +39,13 @@ const HUES: Record<string, string> = {
   violet: "#9b7be0",
   lime: "#8dbf3f",
 };
+
+/** The pivots the report view offers (docs/03 §8.3). */
+const GROUPINGS: Array<{ value: Grouping; label: string }> = [
+  { value: "collection", label: "Collection" },
+  { value: "tag", label: "Tag" },
+  { value: "flat", label: "Flat" },
+];
 
 /** Where the sidebar's collapsed state is remembered between sessions. */
 const SIDEBAR_KEY = "daybook.sidebarCollapsed";
@@ -108,6 +123,21 @@ interface AppComponent {
   rowIndent(node: NodeView): number;
   stamp(ms: number | null | undefined): string;
   promoteFromDetail(node: NodeView, event: Event): void;
+  // -- EOD report (Screen 4)
+  openReport(): void;
+  closeReport(): void;
+  shiftReportDay(days: number): void;
+  setReportGrouping(grouping: Grouping): void;
+  copyReport(): void;
+  reportIsToday(): boolean;
+  reportItemClasses(item: ReportItem): string;
+  reportAnnotation(item: ReportItem): string;
+  GROUPINGS: typeof GROUPINGS;
+  tagColor(name: string): string;
+  clockTime(ms: number | null): string;
+  // -- toast
+  toastMessage: ToastMessage | null;
+  dismissToast(): void;
   // The meta rail edits the *detail* node; `t` and `c` still act on the focused
   // sub-item, so these cannot share the overlay handlers.
   STATUSES: typeof STATUSES;
@@ -212,6 +242,9 @@ Alpine.data("daybook", (): AppComponent => {
       allTags: [],
       allCollections: [],
       detailId: null,
+      report: null,
+      reportDay: "",
+      reportGrouping: "collection",
       activeCollectionId: null,
       sidebarCollapsed: false,
       pendingKey: null,
@@ -229,6 +262,7 @@ Alpine.data("daybook", (): AppComponent => {
     detail: null,
     detailParent: null,
     detailTagDraft: "",
+    toastMessage: null,
     sidebarRows: [],
     newCollectionOpen: false,
     newCollectionDraft: "",
@@ -276,6 +310,8 @@ Alpine.data("daybook", (): AppComponent => {
       } catch {
         // Private windows and blocked site data throw on access, not on read.
       }
+
+      subscribeToasts((message) => (this.toastMessage = message));
 
       let lastCollapsed = controller.snapshot.sidebarCollapsed;
       controller.subscribe((state) => {
@@ -474,6 +510,7 @@ Alpine.data("daybook", (): AppComponent => {
     closeOverlays() {
       controller.closeOverlays();
     },
+    dismissToast,
 
     // -- detail view ---------------------------------------------------------
 
@@ -503,6 +540,64 @@ Alpine.data("daybook", (): AppComponent => {
       event.stopPropagation();
       controller.focus(node.id);
       void controller.dispatch("promote");
+    },
+
+    // -- EOD report ----------------------------------------------------------
+
+    GROUPINGS,
+    openReport() {
+      void controller.openReport();
+    },
+    closeReport() {
+      controller.closeReport();
+    },
+    shiftReportDay(days) {
+      void controller.shiftReportDay(days);
+    },
+    setReportGrouping(grouping) {
+      void controller.openReport(this.state.reportDay, grouping);
+    },
+    copyReport() {
+      const markdown = this.state.report?.markdown;
+      if (!markdown) return;
+      // Markdown is the universal paste target (docs/03 §8.6), so the clipboard
+      // gets the source text, not the rendered HTML.
+      void navigator.clipboard
+        .writeText(markdown)
+        .then(() => toast("Report copied as markdown"))
+        .catch(() => toast("Could not reach the clipboard", "error"));
+    },
+    tagColor(name) {
+      // The report carries tag *names*, not ids — it is a log-derived document,
+      // not a view of the tree. Look the hue up so a chip in the report matches
+      // the same chip in the list.
+      return this.state.allTags.find((t) => t.name === name)?.color ?? "slate";
+    },
+    clockTime(ms) {
+      if (!ms) return "";
+      return new Date(ms).toLocaleTimeString(undefined, {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    },
+    reportIsToday() {
+      return this.state.reportDay === localDayKey(new Date());
+    },
+    reportItemClasses(item) {
+      if (item.status === "done") return "line-through opacity-55";
+      if (item.bucket === "carried_over") return "text-muted-foreground";
+      return "";
+    },
+    reportAnnotation(item) {
+      if (item.bucket === "carried_over") {
+        return item.slippedDays > 0
+          ? `carried over · slipped ${item.slippedDays} day${item.slippedDays === 1 ? "" : "s"}`
+          : "carried over";
+      }
+      if (item.promotedInRange) return "promoted today ↑";
+      if (item.status === "in_progress") return "in progress";
+      if (item.status === "blocked") return "blocked";
+      return "";
     },
 
     // -- detail meta rail ----------------------------------------------------

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ListController } from "./list-controller";
+import { ListController, localDayKey } from "./list-controller";
 import type { EnginePort, NodeView } from "./engine-port";
 
 /**
@@ -57,6 +57,17 @@ function fakeEngine(tree: NodeView[]): EnginePort {
     addToCollection: vi.fn(stub),
     removeFromCollection: vi.fn(stub),
     eventsBetween: () => Promise.resolve([]),
+    generateReport: vi.fn(() =>
+      Promise.resolve({
+        title: "EOD — 2026-08-23",
+        markdown: "# EOD — 2026-08-23\n",
+        sections: [],
+        counts: { created: 0, updated: 0, completed: 0, carriedOver: 0 },
+        carriedOverIds: [],
+        duplicated: false,
+      }),
+    ),
+    commitCarryOver: vi.fn(() => Promise.resolve(0)),
     eventsForNode: () => Promise.resolve([]),
   } as unknown as EnginePort;
 }
@@ -708,6 +719,95 @@ describe("detail view", () => {
 
     await c.dispatch("undo");
     expect(engine.setStatus).toHaveBeenLastCalledWith("root", "todo");
+  });
+});
+
+describe("EOD report", () => {
+  let engine: EnginePort;
+  let controller: ListController;
+
+  beforeEach(async () => {
+    engine = fakeEngine(TREE);
+    controller = new ListController(engine, host);
+    await controller.refresh();
+  });
+
+  it("Ctrl+Shift+E opens today's report", async () => {
+    await controller.dispatch("generate-report");
+    expect(controller.snapshot.report).not.toBeNull();
+    expect(controller.snapshot.reportDay).toBe(localDayKey(new Date()));
+  });
+
+  it("the window is a local day, not a UTC one", async () => {
+    await controller.dispatch("generate-report");
+    const options = (engine.generateReport as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    // Exactly 24h apart, and the label matches the local date — anyone east of
+    // Greenwich in the evening would otherwise be handed yesterday's report.
+    expect(options.toMs - options.fromMs).toBe(86_400_000);
+    expect(options.dateLabel).toBe(localDayKey(new Date()));
+    expect(options.tzOffsetMinutes).toBe(-new Date().getTimezoneOffset());
+  });
+
+  it("the same chord closes it again", async () => {
+    await controller.dispatch("generate-report");
+    await controller.dispatch("generate-report");
+    expect(controller.snapshot.report).toBeNull();
+  });
+
+  it("Esc leaves the report", async () => {
+    await controller.dispatch("generate-report");
+    await controller.dispatch("clear");
+    expect(controller.snapshot.report).toBeNull();
+  });
+
+  it("Esc closes an overlay before it closes the report", async () => {
+    await controller.dispatch("generate-report");
+    await controller.dispatch("cheat-sheet");
+    await controller.dispatch("clear");
+    expect(controller.snapshot.cheatSheetOpen).toBe(false);
+    expect(controller.snapshot.report).not.toBeNull();
+  });
+
+  it("stepping back a day re-generates for that day", async () => {
+    await controller.dispatch("generate-report");
+    await controller.shiftReportDay(-1);
+
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    expect(controller.snapshot.reportDay).toBe(localDayKey(yesterday));
+  });
+
+  it("carry-over is recorded for today but not for a past day", async () => {
+    const commit = engine.commitCarryOver as ReturnType<typeof vi.fn>;
+    engine.generateReport = vi.fn(() =>
+      Promise.resolve({
+        title: "t",
+        markdown: "",
+        sections: [],
+        counts: { created: 0, updated: 0, completed: 0, carriedOver: 1 },
+        carriedOverIds: ["root"],
+        duplicated: false,
+      }),
+    );
+
+    await controller.openReport();
+    expect(commit).toHaveBeenCalledTimes(1);
+
+    // Reading history must not append events that change what tomorrow says.
+    const past = new Date();
+    past.setDate(past.getDate() - 3);
+    await controller.openReport(localDayKey(past));
+    expect(commit).toHaveBeenCalledTimes(1);
+  });
+
+  it("changing the pivot re-generates for the same day", async () => {
+    await controller.dispatch("generate-report");
+    const day = controller.snapshot.reportDay;
+    await controller.openReport(day, "tag");
+
+    const calls = (engine.generateReport as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls[calls.length - 1]![0].groupBy).toBe("tag");
+    expect(controller.snapshot.reportDay).toBe(day);
   });
 });
 

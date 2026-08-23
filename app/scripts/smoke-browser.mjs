@@ -253,6 +253,36 @@ try {
     `${JSON.stringify(bodyBeforeDetail)} → ${JSON.stringify(bodyAfterDetail)}`,
   );
 
+  // --- the EOD report -----------------------------------------------------
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForTimeout(1200);
+  const report = await page.evaluate(() => {
+    const d = window.Alpine.$data(document.getElementById("app"));
+    return { day: d.state.reportDay, markdown: d.state.report?.markdown ?? "" };
+  });
+  check(
+    "Ctrl+Shift+E generates a report for today",
+    report.markdown.startsWith(`# EOD — ${report.day}`),
+    JSON.stringify(report).slice(0, 200),
+  );
+  check(
+    "the report names the work that was captured",
+    report.markdown.includes("Ship EOD report v1"),
+    report.markdown.slice(0, 200),
+  );
+  // The report is a pure function of the log, so asking twice must not change
+  // the answer — this is the property the whole feature rests on.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(400);
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForTimeout(1200);
+  const again = await page.evaluate(
+    () => window.Alpine.$data(document.getElementById("app")).state.report?.markdown ?? "",
+  );
+  check("the report is deterministic across runs", again === report.markdown);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(400);
+
   // --- durability: reload and confirm OPFS kept everything ---------------
   const before = await page.locator("li[role=treeitem]").count();
   await page.reload({ waitUntil: "load" });

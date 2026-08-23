@@ -40,6 +40,7 @@ export const PALETTE_COMMANDS: Command[] = [
   { id: "focus-prev", label: "Move focus up", keys: ["k", "↑"] },
   { id: "jump-first", label: "Jump to first", keys: ["g g"] },
   { id: "jump-last", label: "Jump to last", keys: ["G"] },
+  { id: "generate-report", label: "EOD report for today", keys: ["Ctrl/Cmd+Shift+E"] },
   { id: "cheat-sheet", label: "Keyboard cheat sheet", keys: ["?"] },
 ];
 
@@ -89,6 +90,7 @@ export const CHEAT_SHEET: CheatSheetSection[] = [
     title: "Anywhere",
     rows: [
       { keys: "Ctrl/Cmd+K", action: "Command palette" },
+      { keys: "Ctrl/Cmd+Shift+E", action: "EOD report for today" },
       { keys: "/ or Ctrl/Cmd+F", action: "Search" },
       { keys: "Ctrl/Cmd+Z", action: "Undo" },
       { keys: "Ctrl/Cmd+Shift+Z", action: "Redo" },

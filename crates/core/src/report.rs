@@ -380,6 +380,36 @@ impl<S: Store> Engine<S> {
         // (heading, node_id) pairs, in the order headings should appear.
         let mut placements: Vec<(String, String)> = Vec::new();
 
+        // Membership is per-node, but a sub-item belongs where its parent
+        // belongs. Without this a checklist under a filed todo scatters into
+        // "Uncollected" and the rollup the report exists to show — these three
+        // steps of that one job — reads as three unrelated jobs.
+        let inherited = |item: &ReportItem, own: Vec<String>, of: &dyn Fn(&str) -> Vec<String>| {
+            if !own.is_empty() {
+                return own;
+            }
+            let mut cursor = nodes
+                .iter()
+                .find(|n| n.id == item.node_id)
+                .and_then(|n| n.parent_id.clone());
+            while let Some(parent) = cursor {
+                // Only inherit from an ancestor that is itself in the report, or
+                // the item lands under a heading with no visible parent to sit
+                // beneath.
+                if items.iter().any(|i| i.node_id == parent) {
+                    let from_parent = of(&parent);
+                    if !from_parent.is_empty() {
+                        return from_parent;
+                    }
+                }
+                cursor = nodes
+                    .iter()
+                    .find(|n| n.id == parent)
+                    .and_then(|n| n.parent_id.clone());
+            }
+            Vec::new()
+        };
+
         match options.group_by {
             Grouping::Flat => {
                 for item in items {
@@ -413,10 +443,16 @@ impl<S: Store> Engine<S> {
                         .map(|c| c.name.clone())
                         .unwrap_or_else(|| "Collection".into())
                 };
+                let collections_of = |id: &str| {
+                    nodes
+                        .iter()
+                        .find(|n| n.id == id)
+                        .map(|n| n.collection_ids.clone())
+                        .unwrap_or_default()
+                };
                 for item in items {
-                    let node = nodes.iter().find(|n| n.id == item.node_id);
-                    let memberships: Vec<String> =
-                        node.map(|n| n.collection_ids.clone()).unwrap_or_default();
+                    let memberships =
+                        inherited(item, collections_of(&item.node_id), &collections_of);
                     if memberships.is_empty() {
                         placements.push(("Uncollected".into(), item.node_id.clone()));
                         continue;
@@ -807,6 +843,50 @@ mod tests {
         let headings: Vec<&str> = report.sections.iter().map(|s| s.heading.as_str()).collect();
         // "Uncollected" is the leftovers, so it sorts last however it is named.
         assert_eq!(headings, ["Work", "Uncollected"]);
+    }
+
+    #[test]
+    fn a_sub_item_is_filed_where_its_parent_is() {
+        let e = engine();
+        let work = e.create_collection("Work", None).unwrap();
+        let root = e.create_node(None, "Ship the report", None).unwrap();
+        e.add_to_collection(&root.id, &work.id).unwrap();
+        let child = e
+            .create_node(Some(&root.id), "Query the log", None)
+            .unwrap();
+        e.toggle_done(&child.id).unwrap();
+
+        let report = e.generate_report(&today(&e)).unwrap();
+        let headings: Vec<&str> = report.sections.iter().map(|s| s.heading.as_str()).collect();
+        // Membership is per-node, so the child has none of its own — but filing
+        // it under "Uncollected" would break the parent's checklist in half.
+        assert_eq!(headings, ["Work"]);
+        assert!(
+            report.markdown.contains("\n  - [x] Query the log"),
+            "sub-item did not nest under its parent: {}",
+            report.markdown
+        );
+    }
+
+    #[test]
+    fn a_sub_item_filed_somewhere_else_keeps_its_own_home() {
+        let e = engine();
+        let work = e.create_collection("Work", None).unwrap();
+        let home = e.create_collection("Home", None).unwrap();
+        let root = e.create_node(None, "Parent", None).unwrap();
+        e.add_to_collection(&root.id, &work.id).unwrap();
+        let child = e.create_node(Some(&root.id), "Child", None).unwrap();
+        e.add_to_collection(&child.id, &home.id).unwrap();
+
+        let report = e.generate_report(&today(&e)).unwrap();
+        let home_items: Vec<&str> = report
+            .sections
+            .iter()
+            .find(|s| s.heading == "Home")
+            .map(|s| s.items.iter().map(|i| i.title.as_str()).collect())
+            .unwrap_or_default();
+        // Inheritance is a fallback, not an override.
+        assert_eq!(home_items, ["Child"]);
     }
 
     #[test]
