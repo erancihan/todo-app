@@ -567,6 +567,32 @@ export class ListController {
    * streak mode produces one after every single submit. Nothing here is
    * recoverable content: no title, no body, no children, no tags, no collection.
    */
+  /**
+   * Drop capture rows abandoned by a previous session.
+   *
+   * Capture opens a row *before* you type, and `discardIfEmpty` only runs when
+   * you leave that row. Close the tab or kill the app mid-capture and the blank
+   * row survives — so every launch after a crash left another one, and they
+   * accumulate forever. Same emptiness test as `discardIfEmpty`: no title, no
+   * body, no children, no tags, no collections, not done. Nothing recoverable.
+   */
+  async discardAbandonedRows(): Promise<void> {
+    const empty = this.state.nodes.filter(
+      (n) =>
+        !n.title.trim() &&
+        !n.bodyMd.trim() &&
+        !n.hasChildren &&
+        n.tags.length === 0 &&
+        n.collectionIds.length === 0 &&
+        n.status !== "done",
+    );
+    if (empty.length === 0) return;
+
+    await this.run(async () => {
+      for (const node of empty) await this.engine.deleteNode(node.id);
+    });
+  }
+
   private async discardIfEmpty(id: string): Promise<void> {
     const node = this.state.nodes.find((n) => n.id === id);
     if (!node) return;

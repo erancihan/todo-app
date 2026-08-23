@@ -726,6 +726,49 @@ describe("detail view", () => {
   });
 });
 
+describe("abandoned rows from a previous session", () => {
+  it("clears blank rows left behind at startup", async () => {
+    // A killed app or a closed tab leaves the capture row it opened, and
+    // `discardIfEmpty` never got to run. Without this they accumulate forever.
+    const engine = fakeEngine([
+      node({ id: "real", title: "Real work" }),
+      node({ id: "blank", title: "" }),
+      node({ id: "blank-2", title: "   " }),
+    ]);
+    const controller = new ListController(engine, host);
+    await controller.refresh();
+
+    await controller.discardAbandonedRows();
+    expect(engine.deleteNode).toHaveBeenCalledWith("blank");
+    expect(engine.deleteNode).toHaveBeenCalledWith("blank-2");
+    expect(engine.deleteNode).not.toHaveBeenCalledWith("real");
+  });
+
+  it("keeps a blank row that carries anything at all", async () => {
+    const engine = fakeEngine([
+      node({ id: "tagged", title: "", tags: [{ id: "t", name: "later", color: "slate" }] }),
+      node({ id: "filed", title: "", collectionIds: ["work"] }),
+      node({ id: "parent", title: "", hasChildren: true }),
+      node({ id: "bodied", title: "", bodyMd: "notes" }),
+      node({ id: "done", title: "", status: "done" }),
+    ]);
+    const controller = new ListController(engine, host);
+    await controller.refresh();
+
+    await controller.discardAbandonedRows();
+    expect(engine.deleteNode).not.toHaveBeenCalled();
+  });
+
+  it("does nothing when there is nothing to clear", async () => {
+    const engine = fakeEngine(TREE);
+    const controller = new ListController(engine, host);
+    await controller.refresh();
+
+    await controller.discardAbandonedRows();
+    expect(engine.deleteNode).not.toHaveBeenCalled();
+  });
+});
+
 describe("EOD report", () => {
   let engine: EnginePort;
   let controller: ListController;

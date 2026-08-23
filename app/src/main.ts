@@ -471,11 +471,19 @@ Alpine.data("daybook", (): AppComponent => {
       port.onExternalChange?.(() => void controller.refresh());
 
       void port.runtime().then((r) => (this.runtime = r));
-      void controller.refresh().then(() => {
-        // Empty list on first run: open a capture line immediately rather than
-        // showing a dead screen — insert-by-default, per the discoverability note.
-        if (this.state.nodes.length === 0) void controller.dispatch("quick-add");
-      });
+      void controller
+        .refresh()
+        // Anything blank at startup was abandoned by a session that never got to
+        // clean up after itself — a killed app, a closed tab. Clear it before
+        // deciding whether the list is empty, or the litter would suppress the
+        // capture row that is supposed to greet you.
+        .then(() => controller.discardAbandonedRows())
+        .then(() => {
+          // Empty list on first run: open a capture line immediately rather than
+          // showing a dead screen — insert-by-default, per the discoverability
+          // note.
+          if (this.state.nodes.length === 0) void controller.dispatch("quick-add");
+        });
     },
 
     rows() {
