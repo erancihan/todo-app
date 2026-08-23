@@ -106,6 +106,13 @@ interface AppComponent {
   // -- sidebar
   /** Mirrored reactively for the same reason as `focused` — see below. */
   sidebarRows: SidebarRow[];
+  /**
+   * Lookups the row bindings need, mirrored so they are built once per change
+   * rather than once per row. Scanning the node or collection list inside a
+   * binding is O(n) per row and therefore O(n²) per render.
+   */
+  childCounts: Map<string, { done: number; total: number }>;
+  collectionsById: Map<string, { name: string; color: string }>;
   selectCollection(id: string | null): void;
   toggleSidebar(): void;
   newCollection(): void;
@@ -321,6 +328,8 @@ Alpine.data("daybook", (): AppComponent => {
     theme: "dark",
     density: "dense",
     sidebarRows: [],
+    childCounts: new Map(),
+    collectionsById: new Map(),
     newCollectionOpen: false,
     newCollectionDraft: "",
 
@@ -382,6 +391,8 @@ Alpine.data("daybook", (): AppComponent => {
         this.detail = controller.detailNode;
         this.detailParent = controller.detailParent;
         this.sidebarRows = controller.sidebarRows;
+        this.childCounts = controller.childCounts;
+        this.collectionsById = new Map(state.allCollections.map((c) => [c.id, c]));
 
         if (state.sidebarCollapsed !== lastCollapsed) {
           lastCollapsed = state.sidebarCollapsed;
@@ -487,12 +498,11 @@ Alpine.data("daybook", (): AppComponent => {
       // Tolerates null: `x-show` gates *rendering*, not evaluation, so the
       // detail header's binding still runs while no detail view is open.
       if (!node) return "";
-      const children = this.state.nodes.filter((n) => n.parentId === node.id);
-      const done = children.filter((n) => n.status === "done").length;
-      return `${done}/${children.length}`;
+      const counts = this.childCounts.get(node.id);
+      return counts ? `${counts.done}/${counts.total}` : "0/0";
     },
     collectionName(id) {
-      return this.state.allCollections.find((c) => c.id === id)?.name ?? "Collection";
+      return this.collectionsById.get(id)?.name ?? "Collection";
     },
     collectionColor(hue) {
       // "All" has no hue of its own and collections created before the engine
@@ -502,9 +512,7 @@ Alpine.data("daybook", (): AppComponent => {
     collectionDotColor(id) {
       // A row's dot and its sidebar entry must be the same colour, or the dot
       // stops being a way to tell at a glance which collection a todo is in.
-      return this.collectionColor(
-        this.state.allCollections.find((c) => c.id === id)?.color ?? "",
-      );
+      return this.collectionColor(this.collectionsById.get(id)?.color ?? "");
     },
 
     // -- sidebar -------------------------------------------------------------

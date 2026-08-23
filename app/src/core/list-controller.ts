@@ -217,6 +217,61 @@ export class ListController {
    * reimplemented there, they act on whatever `visible` currently means.
    */
   get visible(): NodeView[] {
+    // Memoised on identity, and this is load-bearing rather than a micro-
+    // optimisation. Alpine re-runs `x-for` whenever the array it iterates is a
+    // *different object*, so recomputing here handed it a fresh array on every
+    // `patch` — including a bare focus move — and it rebuilt every row's DOM to
+    // change one highlight. Measured at 2000 todos that was ~12s per `j`.
+    // Returning the same array when nothing that shapes it has changed turns a
+    // keypress back into two class updates.
+    const key: unknown[] = [
+      this.state.nodes,
+      this.state.detailId,
+      this.state.activeCollectionId,
+      this.state.query,
+    ];
+    const cached = this.visibleCache;
+    if (cached && cached.key.length === key.length && cached.key.every((v, i) => v === key[i])) {
+      return cached.rows;
+    }
+
+    const rows = this.computeVisible();
+    this.visibleCache = { key, rows };
+    return rows;
+  }
+
+  private visibleCache: { key: unknown[]; rows: NodeView[] } | null = null;
+
+  /**
+   * Done/total per parent, computed once per tree rather than once per row.
+   *
+   * The view needs this for every row's rollup badge. Reading it by filtering
+   * the whole node list inside the row binding made rendering O(n²) — at 2000
+   * todos that is four million comparisons per keystroke, which is exactly
+   * where the list stopped being usable.
+   */
+  get childCounts(): Map<string, { done: number; total: number }> {
+    if (this.childCountsCache?.nodes === this.state.nodes) return this.childCountsCache.counts;
+
+    const counts = new Map<string, { done: number; total: number }>();
+    for (const node of this.state.nodes) {
+      const parent = node.parentId ?? null;
+      if (!parent) continue;
+      const entry = counts.get(parent) ?? { done: 0, total: 0 };
+      entry.total += 1;
+      if (node.status === "done") entry.done += 1;
+      counts.set(parent, entry);
+    }
+    this.childCountsCache = { nodes: this.state.nodes, counts };
+    return counts;
+  }
+
+  private childCountsCache: {
+    nodes: NodeView[];
+    counts: Map<string, { done: number; total: number }>;
+  } | null = null;
+
+  private computeVisible(): NodeView[] {
     if (this.state.detailId) return this.applyCollapse(this.subtreeOf(this.state.detailId));
 
     let rows = this.applyCollapse(this.state.nodes);
