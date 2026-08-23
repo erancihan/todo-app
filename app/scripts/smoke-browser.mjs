@@ -340,6 +340,51 @@ try {
   const bodyText = await page.locator("body").textContent();
   check("the captured todo is still there", bodyText.includes("Ship EOD report v1"));
 
+  // --- image attachments --------------------------------------------------
+  // Bytes never enter the body; it carries `![](attachment:<sha256>)` and the
+  // blob table holds the image under that hash.
+  await page.keyboard.press("n");
+  await page.waitForTimeout(700);
+  await page.locator(".cm-content").first().click();
+  await page.keyboard.type("Screenshot of the bug");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(200);
+  await page.evaluate(async () => {
+    // A 1x1 PNG is enough: what is under test is the path, not the decoder.
+    const b64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const dt = new DataTransfer();
+    dt.items.add(new File([bytes], "shot.png", { type: "image/png" }));
+    document
+      .querySelector(".cm-content")
+      .dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+  await page.waitForTimeout(2500);
+
+  const attached = await page.evaluate(() => {
+    const d = window.Alpine.$data(document.getElementById("app"));
+    const node = d.state.nodes.find((n) => n.bodyMd.includes("attachment:"));
+    return node?.bodyMd ?? "";
+  });
+  check(
+    "a pasted image becomes a content-addressed reference",
+    /!\[\]\(attachment:[0-9a-f]{64}\)/.test(attached),
+    JSON.stringify(attached).slice(0, 120),
+  );
+
+  const rendered = await page.evaluate(
+    () => document.querySelectorAll(".cm-md-image img").length,
+  );
+  check("the attachment renders inline as an image", rendered > 0, `${rendered} images`);
+
+  await page.keyboard.press("Control+Enter");
+  await page.waitForTimeout(500);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(900);
+
   // --- a second tab -------------------------------------------------------
   // OPFS grants its database lock to one context per origin, so this used to
   // fail to boot outright. The second tab now finds the first through a Web

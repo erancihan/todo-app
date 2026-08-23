@@ -16,6 +16,8 @@ import { EditorSelection, EditorState, type Extension } from "@codemirror/state"
 import { EditorView, keymap, placeholder } from "@codemirror/view";
 import { livePreview } from "./live-preview";
 import { tokenComplete, type TokenSources } from "./token-complete";
+import { attachments, type AttachmentSink } from "./attachments";
+import { imageWidgets, type AttachmentSource } from "./image-widget";
 
 export interface BodyEditorCallbacks {
   /** `Ctrl/Cmd+Enter`. */
@@ -33,6 +35,11 @@ export interface BodyEditorCallbacks {
    * would file a sub-item's tag onto the todo you were looking at.
    */
   tokens?: TokenSources;
+  /**
+   * Paste/drop-to-attach and inline image rendering. Optional so a harness can
+   * build an editor without an engine behind it.
+   */
+  images?: AttachmentSink & AttachmentSource;
 }
 
 /** How long typing must pause before an autosave fires. */
@@ -129,6 +136,9 @@ export class BodyEditor {
       markdown(),
       livePreview(),
       ...(this.callbacks.tokens ? [tokenComplete(this.callbacks.tokens)] : []),
+      ...(this.callbacks.images
+        ? [attachments(this.callbacks.images), imageWidgets(this.callbacks.images)]
+        : []),
       EditorView.lineWrapping,
       placeholder("Write markdown… Ctrl/Cmd+Enter to submit"),
       EditorView.updateListener.of((update) => {

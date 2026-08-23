@@ -11,6 +11,7 @@
 
 use std::sync::Mutex;
 
+use daybook_core::engine::{BlobMeta, BlobView};
 use daybook_core::ids::DeviceId;
 use daybook_core::node::Status;
 use daybook_core::report::{Report, ReportOptions};
@@ -307,6 +308,26 @@ fn set_due(state: tauri::State<'_, AppState>, id: String, due_ms: Option<i64>) -
         .map_err(to_err)
 }
 
+#[tauri::command]
+fn put_blob(state: tauri::State<'_, AppState>, mime: String, bytes: Vec<u8>) -> CmdResult<String> {
+    state
+        .engine
+        .lock()
+        .unwrap()
+        .put_blob(&mime, &bytes)
+        .map_err(to_err)
+}
+
+#[tauri::command]
+fn blob(state: tauri::State<'_, AppState>, hash: String) -> CmdResult<Option<BlobView>> {
+    state.engine.lock().unwrap().blob(&hash).map_err(to_err)
+}
+
+#[tauri::command]
+fn list_blobs(state: tauri::State<'_, AppState>) -> CmdResult<Vec<BlobMeta>> {
+    state.engine.lock().unwrap().list_blobs().map_err(to_err)
+}
+
 /// The EOD report. The window and UTC offset come from the WebView, which is the
 /// only side that knows the viewer's local day boundary.
 #[tauri::command]
@@ -394,6 +415,9 @@ pub fn run() {
             events_between,
             events_for_node,
             set_due,
+            put_blob,
+            blob,
+            list_blobs,
             generate_report,
             commit_carry_over,
         ])

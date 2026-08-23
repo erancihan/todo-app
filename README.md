@@ -51,6 +51,8 @@ _Created 2 · Updated 0 · Completed 2 · Carried over 0_
 │   │                    body-editor.ts     CodeMirror 6
 │   │                    live-preview.ts    Obsidian-style inline rendering
 │   │                    token-complete.ts  #tag / @collection autocomplete
+│   │                    attachments.ts     paste/drop images
+│   │                    image-widget.ts    render attachment:<hash> inline
 │   │                    db-worker.ts       sqlite-wasm + OPFS driver
 │   │                    tab-lease.ts       one engine per origin, many tabs
 │   ├── src/main.ts    Alpine boot — the view layer, and only the view layer

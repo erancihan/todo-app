@@ -69,6 +69,9 @@ function fakeEngine(tree: NodeView[]): EnginePort {
       }),
     ),
     commitCarryOver: vi.fn(() => Promise.resolve(0)),
+    putBlob: vi.fn(() => Promise.resolve("hash")),
+    blob: vi.fn(() => Promise.resolve(null)),
+    listBlobs: vi.fn(() => Promise.resolve([])),
     eventsForNode: () => Promise.resolve([]),
   } as unknown as EnginePort;
 }

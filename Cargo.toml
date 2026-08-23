@@ -22,6 +22,10 @@ yrs = "=0.27.3"
 # --- serialization / ids / errors ---
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
+# Content-addressing for attachments. Pure Rust, no C, so it compiles for wasm32
+# as-is — which matters, because the hash has to be computed identically on both
+# hosts or the same bytes would get two names.
+sha2 = "=0.10.9"
 thiserror = "=2.0.19"
 uuid = { version = "=1.24.0", features = ["v7"] }
 

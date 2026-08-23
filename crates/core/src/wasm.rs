@@ -56,6 +56,8 @@ impl JsStore {
                 SqlValue::Int(i) => JsValue::from_f64(*i as f64),
                 SqlValue::Real(f) => JsValue::from_f64(*f),
                 SqlValue::Text(s) => JsValue::from_str(s),
+                // sqlite-wasm binds a `Uint8Array` straight to a BLOB parameter.
+                SqlValue::Blob(b) => js_sys::Uint8Array::from(&b[..]).into(),
             });
         }
         array
@@ -64,6 +66,11 @@ impl JsStore {
     fn js_to_value(value: &JsValue) -> SqlValue {
         if value.is_null() || value.is_undefined() {
             SqlValue::Null
+        } else if value.is_instance_of::<js_sys::Uint8Array>() {
+            // A BLOB column. Checked before the number and string branches
+            // because a typed array is neither, and falling through would turn
+            // an attachment into `SqlValue::Null`.
+            SqlValue::Blob(js_sys::Uint8Array::unchecked_from_js_ref(value).to_vec())
         } else if let Some(n) = value.as_f64() {
             // SQLite INTEGER columns come back as JS numbers. Treat a whole number
             // as an integer so `as_i64` works on timestamps and flags; anything
@@ -389,6 +396,23 @@ impl DaybookEngine {
             .borrow()
             .set_due(&id, due_ms.map(|d| d as i64))
             .map_err(err)
+    }
+
+    /// Store bytes, return the SHA-256. `bytes` is a `Uint8Array` from a paste
+    /// or a file drop — it never becomes a string on the way in.
+    #[wasm_bindgen(js_name = putBlob)]
+    pub fn put_blob(&self, mime: String, bytes: Vec<u8>) -> std::result::Result<String, JsValue> {
+        self.inner.borrow().put_blob(&mime, &bytes).map_err(err)
+    }
+
+    #[wasm_bindgen(js_name = blob)]
+    pub fn blob(&self, hash: String) -> std::result::Result<JsValue, JsValue> {
+        to_js(&self.inner.borrow().blob(&hash).map_err(err)?)
+    }
+
+    #[wasm_bindgen(js_name = listBlobs)]
+    pub fn list_blobs(&self) -> std::result::Result<JsValue, JsValue> {
+        to_js(&self.inner.borrow().list_blobs().map_err(err)?)
     }
 
     #[wasm_bindgen(js_name = generateReport)]

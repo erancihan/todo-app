@@ -78,3 +78,23 @@ mod tests {
         assert!(decode("not base64!").is_err());
     }
 }
+
+/// Serde adapter so a `Vec<u8>` field crosses as base64 text.
+///
+/// Both hosts need this and for the same reason: `serde_json` and
+/// `serde_wasm_bindgen` would otherwise render a byte array as a JSON array of
+/// numbers — roughly six characters per byte, so a 200 KB screenshot arrives as
+/// a megabyte of digits. Base64 costs a third instead of six times, and the
+/// browser wants a base64 string anyway to build a `data:` URL.
+pub mod serde_bytes {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&super::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(d)?;
+        super::decode(&text).map_err(serde::de::Error::custom)
+    }
+}

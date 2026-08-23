@@ -17,6 +17,7 @@ Sibling docs: [README](README.md) · [01 — Product Requirements](docs/01-produ
 | **Phase 2** — sync + images | **Not started.** The relay crate exists as a skeleton and serves nothing. |
 | **Phase 3** — EOD report + polish | **Mostly done.** Report engine, report view, detail view, sidebar, density/theme, reduced-motion, copy-as-markdown all ship. Inline thumbnails wait on Phase 2. |
 | **Multi-tab browser** | **Done.** One tab holds the OPFS database and the others call it through a Web Lock + `BroadcastChannel`; the leader's tab closing promotes a waiter automatically. |
+| **Attachments** | **Local half done** — paste/drop, SHA-256 content addressing, inline rendering. The sync channel is Phase 2. |
 | **Phase 4** — mobile hardening + v1 | **Not started.** |
 
 ---
@@ -46,10 +47,12 @@ The groundwork is deliberately in place: [`crates/core/src/op.rs`](crates/core/s
 
 **First step:** the relay's storage trait and the op-log table, then a two-client convergence test — offline edits to the same body from two devices, converging with no lost characters. That test is the whole phase in miniature; write it before the transport.
 
-### Image attachments
-Content-addressed SHA-256 blobs on a separate sync channel, with blurhash degradation while bytes are in flight. Tied to Phase 2 by design — an attachment that cannot sync is a local file with extra steps.
+### Image attachments — sync half only
+**The local half ships.** Paste or drop an image into a body and it is hashed with SHA-256, stored once in the `blob` table, referenced from the body as `![](attachment:<hash>)`, and rendered inline by a widget decoration. The same screenshot pasted into three todos is one stored copy.
 
-**First step:** the local half. Paste-to-attach in CodeMirror, blob write, `![](attachment:<hash>)` in the body, and a decoration widget in [`live-preview.ts`](app/src/core/live-preview.ts). That is useful on its own and does not need the relay.
+What is left is the Phase 2 channel: uploading blobs to the relay's content-addressed store, downloading on demand, an offline queue, an LRU size cap on the local cache, and blurhash so a todo whose bytes have not arrived renders something rather than a gap. The widget already degrades to a placeholder for an unknown hash, which is the same state "not downloaded yet" will be.
+
+**First step:** blurhash generation at attach time, stored beside the bytes. It is useful before the relay exists — it is what makes the degraded state look deliberate — and it has to be computed where the full-resolution image is.
 
 ### Account and host switcher
 [`docs/04` §8](docs/04-ux-and-interaction.md) puts a workspace-switcher above the collections sidebar, toggling an "All accounts" aggregate against a per-host view. It is deliberately absent: it is a surface for a feature that does not exist yet. There is exactly one local account until sync lands, and a switcher with one entry is chrome that teaches nothing.

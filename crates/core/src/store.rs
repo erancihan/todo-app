@@ -36,6 +36,10 @@ pub enum SqlValue {
     Int(i64),
     Real(f64),
     Text(String),
+    /// Raw bytes. Attachments are stored as blobs rather than base64 text —
+    /// base64 costs a third more space and a decode on every read, on the one
+    /// kind of value where size actually matters.
+    Blob(Vec<u8>),
 }
 
 impl SqlValue {
@@ -58,6 +62,13 @@ impl SqlValue {
     /// `NOT NULL DEFAULT ''` but arrive through a LEFT JOIN.
     pub fn text_or_default(&self) -> String {
         self.as_str().unwrap_or_default().to_owned()
+    }
+
+    pub fn as_blob(&self) -> Option<&[u8]> {
+        match self {
+            SqlValue::Blob(b) => Some(b),
+            _ => None,
+        }
     }
 
     pub fn is_null(&self) -> bool {
@@ -84,6 +95,12 @@ impl From<i64> for SqlValue {
         SqlValue::Int(i)
     }
 }
+impl From<Vec<u8>> for SqlValue {
+    fn from(value: Vec<u8>) -> Self {
+        SqlValue::Blob(value)
+    }
+}
+
 impl From<bool> for SqlValue {
     fn from(b: bool) -> Self {
         SqlValue::Int(b as i64)
@@ -209,6 +226,20 @@ CREATE TABLE IF NOT EXISTS event (
 CREATE INDEX IF NOT EXISTS event_by_time ON event (account_id, occurred_ms);
 CREATE INDEX IF NOT EXISTS event_by_node ON event (account_id, node_id);
 
+-- Attachments, content-addressed by SHA-256 (docs/02-architecture.md).
+-- The hash IS the identity: pasting the same screenshot into two todos stores
+-- one copy, and Phase 2's sync channel can ask for bytes by name without any
+-- coordination. The body only ever carries `![](attachment:<hash>)`.
+CREATE TABLE IF NOT EXISTS blob (
+  account_id TEXT    NOT NULL,
+  hash       TEXT    NOT NULL,
+  mime       TEXT    NOT NULL DEFAULT '',
+  bytes      BLOB    NOT NULL,
+  byte_size  INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (account_id, hash)
+);
+
 -- Axis 1: Collections — named, nestable, the future unit of sharing.
 CREATE TABLE IF NOT EXISTS collection (
   account_id TEXT    NOT NULL,
@@ -279,6 +310,7 @@ mod native {
                 SqlValue::Int(i) => ToSqlOutput::Owned(Value::Integer(*i)),
                 SqlValue::Real(f) => ToSqlOutput::Owned(Value::Real(*f)),
                 SqlValue::Text(s) => ToSqlOutput::Borrowed(ValueRef::Text(s.as_bytes())),
+                SqlValue::Blob(b) => ToSqlOutput::Borrowed(ValueRef::Blob(b)),
             })
         }
     }
@@ -347,11 +379,7 @@ mod native {
                             rusqlite::types::ValueRef::Text(v) => {
                                 SqlValue::Text(String::from_utf8_lossy(v).into_owned())
                             }
-                            // Not produced by our schema, but a hand-run query or a
-                            // future migration could; degrade rather than panic.
-                            rusqlite::types::ValueRef::Blob(v) => {
-                                SqlValue::Text(String::from_utf8_lossy(v).into_owned())
-                            }
+                            rusqlite::types::ValueRef::Blob(v) => SqlValue::Blob(v.to_vec()),
                         });
                     }
                     Ok(row)

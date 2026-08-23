@@ -114,6 +114,23 @@ export interface Report {
   duplicated: boolean;
 }
 
+/** An attachment, bytes included, as base64 (see `b64::serde_bytes` in Rust). */
+export interface BlobView {
+  hash: string;
+  mime: string;
+  /** Base64. Both hosts send it this way — a JSON array of numbers would be six
+   *  characters a byte, so a 200 KB screenshot would arrive as a megabyte. */
+  bytes: string;
+  byteSize: number;
+}
+
+export interface BlobMeta {
+  hash: string;
+  mime: string;
+  byteSize: number;
+  createdAt: number;
+}
+
 export interface EventView {
   id: string;
   nodeId: string;
@@ -164,6 +181,11 @@ export interface EnginePort {
 
   eventsBetween(fromMs: number, toMs: number): Promise<EventView[]>;
   eventsForNode(nodeId: string): Promise<EventView[]>;
+
+  /** Store bytes; returns their SHA-256, which is the attachment's name. */
+  putBlob(mime: string, bytes: Uint8Array): Promise<string>;
+  blob(hash: string): Promise<BlobView | null>;
+  listBlobs(): Promise<BlobMeta[]>;
 
   generateReport(options: ReportOptions): Promise<Report>;
   commitCarryOver(nodeIds: string[], dayKey: string): Promise<number>;
@@ -275,6 +297,17 @@ class TauriEnginePort implements EnginePort {
   eventsForNode(nodeId: string) {
     return this.invoke<EventView[]>("events_for_node", { nodeId });
   }
+  putBlob(mime: string, bytes: Uint8Array) {
+    // Tauri's IPC serializes a typed array as a JSON number array, which is what
+    // the Rust command's `Vec<u8>` expects on the way in.
+    return this.invoke<string>("put_blob", { mime, bytes: Array.from(bytes) });
+  }
+  blob(hash: string) {
+    return this.invoke<BlobView | null>("blob", { hash });
+  }
+  listBlobs() {
+    return this.invoke<BlobMeta[]>("list_blobs");
+  }
   generateReport(options: ReportOptions) {
     return this.invoke<Report>("generate_report", { options });
   }
@@ -296,6 +329,8 @@ const READ_ONLY = new Set([
   "eventsBetween",
   "eventsForNode",
   "generateReport",
+  "blob",
+  "listBlobs",
 ]);
 
 /** How long a follower waits for the leader before giving up on a call. */
@@ -554,6 +589,15 @@ class WasmEnginePort implements EnginePort {
   }
   eventsForNode(nodeId: string) {
     return this.call<EventView[]>("eventsForNode", nodeId);
+  }
+  putBlob(mime: string, bytes: Uint8Array) {
+    return this.call<string>("putBlob", mime, bytes);
+  }
+  blob(hash: string) {
+    return this.call<BlobView | null>("blob", hash);
+  }
+  listBlobs() {
+    return this.call<BlobMeta[]>("listBlobs");
   }
   generateReport(options: ReportOptions) {
     return this.call<Report>("generateReport", options);

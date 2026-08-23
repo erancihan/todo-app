@@ -88,6 +88,27 @@ pub struct EventView {
     pub occurred_ms: i64,
 }
 
+/// An attachment with its bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlobView {
+    pub hash: String,
+    pub mime: String,
+    #[serde(with = "crate::b64::serde_bytes")]
+    pub bytes: Vec<u8>,
+    pub byte_size: i64,
+}
+
+/// An attachment without them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlobMeta {
+    pub hash: String,
+    pub mime: String,
+    pub byte_size: i64,
+    pub created_at: i64,
+}
+
 /// The 8 muted hues (docs/04-ux-and-interaction.md §7.1), assigned round-robin so
 /// a new tag or collection gets a stable colour without asking the user to pick
 /// one. Assigned here rather than derived in the UI so the colour is durable: it
@@ -1206,6 +1227,70 @@ impl<S: Store> Engine<S> {
             .collect())
     }
 
+    // -- attachments -------------------------------------------------------
+
+    /// Store bytes and return their SHA-256, lowercase hex.
+    ///
+    /// Content-addressed, so this is idempotent: pasting the same screenshot into
+    /// three todos stores one copy and yields one name. That is also what lets
+    /// Phase 2's blob channel ask for bytes without any coordination — the hash
+    /// is the request.
+    pub fn put_blob(&self, mime: &str, bytes: &[u8]) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        let hash = format!("{:x}", Sha256::digest(bytes));
+
+        // `OR IGNORE`, not `OR REPLACE`: identical content by definition, so a
+        // rewrite would burn a page write to store what is already there.
+        self.store.execute(
+            "INSERT OR IGNORE INTO blob (account_id, hash, mime, bytes, byte_size, created_at)              VALUES (?, ?, ?, ?, ?, ?)",
+            &[
+                self.account(),
+                hash.as_str().into(),
+                mime.into(),
+                bytes.to_vec().into(),
+                (bytes.len() as i64).into(),
+                self.now_ms().into(),
+            ],
+        )?;
+        Ok(hash)
+    }
+
+    /// Read an attachment back. `None` when the bytes are not here — which in
+    /// Phase 2 will also mean "not downloaded yet", not just "does not exist".
+    pub fn blob(&self, hash: &str) -> Result<Option<BlobView>> {
+        let rows = self.store.query(
+            "SELECT hash, mime, bytes, byte_size FROM blob WHERE account_id = ? AND hash = ?",
+            &[self.account(), hash.into()],
+        )?;
+        Ok(rows.first().map(|r| BlobView {
+            hash: r[0].text_or_default(),
+            mime: r[1].text_or_default(),
+            bytes: r[2].as_blob().unwrap_or_default().to_vec(),
+            byte_size: r[3].as_i64().unwrap_or(0),
+        }))
+    }
+
+    /// Every attachment's metadata, newest first — without the bytes.
+    ///
+    /// Deliberately separate from [`Engine::blob`]: a listing that carried the
+    /// bytes would pull every image in the account through the wasm boundary to
+    /// render a size column.
+    pub fn list_blobs(&self) -> Result<Vec<BlobMeta>> {
+        let rows = self.store.query(
+            "SELECT hash, mime, byte_size, created_at FROM blob WHERE account_id = ?              ORDER BY created_at DESC",
+            &[self.account()],
+        )?;
+        Ok(rows
+            .iter()
+            .map(|r| BlobMeta {
+                hash: r[0].text_or_default(),
+                mime: r[1].text_or_default(),
+                byte_size: r[2].as_i64().unwrap_or(0),
+                created_at: r[3].as_i64().unwrap_or(0),
+            })
+            .collect())
+    }
+
     /// The timestamp of each node's most recent *user* event.
     ///
     /// The report needs "when was this last actually worked on", and the answer
@@ -1576,6 +1661,86 @@ mod tests {
     }
 
     // -- the event log ------------------------------------------------------
+
+    #[test]
+    fn the_same_bytes_get_the_same_name_and_are_stored_once() {
+        let e = engine();
+        let png = b"\x89PNG\r\n\x1a\n fake image bytes";
+
+        let first = e.put_blob("image/png", png).unwrap();
+        let second = e.put_blob("image/png", png).unwrap();
+        assert_eq!(
+            first, second,
+            "content addressing is not content addressing"
+        );
+        assert_eq!(e.list_blobs().unwrap().len(), 1, "stored twice");
+
+        // Lowercase hex SHA-256.
+        assert_eq!(first.len(), 64);
+        assert!(first
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn different_bytes_get_different_names() {
+        let e = engine();
+        let a = e.put_blob("image/png", b"one").unwrap();
+        let b = e.put_blob("image/png", b"two").unwrap();
+        assert_ne!(a, b);
+        assert_eq!(e.list_blobs().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn bytes_survive_the_round_trip_unchanged() {
+        let e = engine();
+        // Every byte value, so a text-column round trip or a stray UTF-8
+        // conversion anywhere in the store port would corrupt it.
+        let bytes: Vec<u8> = (0..=255u8).cycle().take(1024).collect();
+        let hash = e.put_blob("application/octet-stream", &bytes).unwrap();
+
+        let read = e.blob(&hash).unwrap().expect("blob vanished");
+        assert_eq!(read.bytes, bytes);
+        assert_eq!(read.byte_size, 1024);
+        assert_eq!(read.mime, "application/octet-stream");
+    }
+
+    #[test]
+    fn an_unknown_hash_is_none_rather_than_an_error() {
+        let e = engine();
+        // In Phase 2 this also means "not downloaded yet", so it has to be an
+        // ordinary absence the UI can degrade around, not a failure.
+        assert!(e.blob("0".repeat(64).as_str()).unwrap().is_none());
+    }
+
+    #[test]
+    fn listing_attachments_leaves_the_bytes_behind() {
+        let e = engine();
+        let big = vec![7u8; 4096];
+        let hash = e.put_blob("image/png", &big).unwrap();
+
+        let listed = e.list_blobs().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].hash, hash);
+        assert_eq!(listed[0].byte_size, 4096);
+    }
+
+    #[test]
+    fn attachments_are_scoped_to_their_account() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.init_schema().unwrap();
+        let mine = Engine::open(store, "acct-a", DeviceId::from("device-aaaa-0001")).unwrap();
+        let hash = mine.put_blob("image/png", b"secret").unwrap();
+
+        let other = Engine::open(
+            SqliteStore::in_memory().unwrap(),
+            "acct-b",
+            DeviceId::from("device-bbbb-0001"),
+        )
+        .unwrap();
+        assert!(other.blob(&hash).unwrap().is_none());
+        assert!(other.list_blobs().unwrap().is_empty());
+    }
 
     #[test]
     fn a_due_date_can_be_set_and_cleared() {

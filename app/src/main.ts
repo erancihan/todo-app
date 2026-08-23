@@ -11,6 +11,7 @@ import Alpine from "alpinejs";
 import "./app.css";
 import { BodyEditor } from "./core/body-editor";
 import type { TokenSources } from "./core/token-complete";
+import { dataUrl } from "./core/image-widget";
 import {
   engine,
   isTauri,
@@ -218,6 +219,22 @@ Alpine.data("daybook", (): AppComponent => {
     },
   });
 
+  /**
+   * Attachment storage and lookup, shared by both editors.
+   *
+   * Not per-editor like `tokenSources`: an attachment belongs to the account,
+   * not to the row that happened to receive the paste, so there is nothing to
+   * bind to a node here.
+   */
+  const imageStore = {
+    put: (mime: string, bytes: Uint8Array) => port.putBlob(mime, bytes),
+    onError: (text: string) => toast(`Could not attach that image: ${text}`, "error"),
+    url: async (hash: string) => {
+      const blob = await port.blob(hash);
+      return blob ? dataUrl(blob.mime, blob.bytes) : null;
+    },
+  };
+
   /** Pending debounce for the `/` filter — see `onQuery`. */
   let queryTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -246,6 +263,7 @@ Alpine.data("daybook", (): AppComponent => {
         onExit: () => void controller.exitEdit(),
         onChange: (text) => controller.saveFocusedBody(text),
         tokens: tokenSources(() => controller.snapshot.focusedId),
+        images: imageStore,
       });
     } else if (editor.element.parentElement !== slot) {
       slot.appendChild(editor.element);
@@ -283,6 +301,7 @@ Alpine.data("daybook", (): AppComponent => {
         },
         onChange: (text) => controller.saveDetailBody(text),
         tokens: tokenSources(() => controller.snapshot.detailId),
+        images: imageStore,
       });
     } else if (detailEditor.element.parentElement !== slot) {
       slot.appendChild(detailEditor.element);
