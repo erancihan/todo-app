@@ -67,6 +67,9 @@ const THEMES: Array<{ value: Theme; label: string; icon: string }> = [
   { value: "system", label: "System", icon: "◐" },
 ];
 
+/** How long typing must pause before the `/` filter is applied. */
+const QUERY_DEBOUNCE_MS = 120;
+
 /** Where the sidebar's collapsed state is remembered between sessions. */
 const SIDEBAR_KEY = "daybook.sidebarCollapsed";
 
@@ -140,6 +143,7 @@ interface AppComponent {
   submitCollection(): void;
   inCollection(collectionId: string): boolean;
   onQuery(value: string): void;
+  searchDraft: string;
   closeOverlays(): void;
   // -- detail view (Screen 3)
   /** Mirrored reactively, like `focused`. */
@@ -213,6 +217,9 @@ Alpine.data("daybook", (): AppComponent => {
       else void controller.createCollection(name, id);
     },
   });
+
+  /** Pending debounce for the `/` filter — see `onQuery`. */
+  let queryTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Which row the editor is currently mounted into. */
   let mountedNodeId: string | null = null;
@@ -324,6 +331,7 @@ Alpine.data("daybook", (): AppComponent => {
     detail: null,
     detailParent: null,
     detailTagDraft: "",
+    searchDraft: "",
     toastMessage: null,
     theme: "dark",
     density: "dense",
@@ -392,6 +400,8 @@ Alpine.data("daybook", (): AppComponent => {
         this.detailParent = controller.detailParent;
         this.sidebarRows = controller.sidebarRows;
         this.childCounts = controller.childCounts;
+        // Esc clears the filter in the controller; the input has to follow.
+        if (!state.query && !state.searchOpen) this.searchDraft = "";
         this.collectionsById = new Map(state.allCollections.map((c) => [c.id, c]));
 
         if (state.sidebarCollapsed !== lastCollapsed) {
@@ -579,7 +589,13 @@ Alpine.data("daybook", (): AppComponent => {
       return this.focused?.collectionIds.includes(collectionId) ?? false;
     },
     onQuery(value) {
-      controller.setQuery(value);
+      // The input owns its own text; only the *applied* filter reaches the
+      // controller, and only after a pause. Patching per keystroke re-rendered
+      // the whole list for a query that was about to change again — measured at
+      // ~390ms a character across 2000 rows, nearly all of it thrown away.
+      this.searchDraft = value;
+      if (queryTimer) clearTimeout(queryTimer);
+      queryTimer = setTimeout(() => controller.setQuery(value), QUERY_DEBOUNCE_MS);
     },
     closeOverlays() {
       controller.closeOverlays();

@@ -65,14 +65,16 @@ Content-addressed SHA-256 blobs on a separate sync channel, with blurhash degrad
 
 | Visible rows | Per `j` keypress | Filter to one match |
 | --- | --- | --- |
-| 500 | 74 ms | 2.0 s |
-| 2000 | 296 ms | 4.7 s |
+| 500 | 74 ms | 0.6 s |
+| 2000 | 296 ms | 1.7 s |
 
-Those are *after* fixing what the measurement actually found — see below — which took the 2000-row keypress from **12.7 s** to 296 ms. What remains is Alpine's own per-binding overhead across every rendered row, and that is the part virtualization would remove.
+Those are *after* fixing what the measurement actually found — see below — which took the 2000-row keypress from **12.7 s** to 296 ms and the filter from **124 s** to 1.7 s. What remains is Alpine's own per-binding overhead across every rendered row, and that is the part virtualization would remove.
 
 Still deferred, but on a number rather than a hunch: comfortable to a few hundred visible rows, sluggish at a couple of thousand, and collection scoping plus collapse keep the usual working set well below that. The costs are real — virtualization fights `aria-activedescendant`, breaks the browser's own `Ctrl+F`, and complicates focus management.
 
 **First step when it is time:** the row markup is a flat `<li>` list with no per-row state, which is the easy case. Keep `aria-setsize`/`aria-posinset` on the rendered window so the tree still reads correctly when only part of it exists.
+
+The `/` filter is also debounced by 120 ms, so a query is applied once when typing pauses rather than re-rendering the list for every character on its way to something else.
 
 **What the measurement found, and what was fixed:** the collapse was not rendering volume. It was two row bindings that each scanned the whole node list — `childCount` filtered all *n* nodes once per row, making every render O(n²), which at 2000 todos is four million comparisons per keystroke. Those lookups are now built once per change in the controller (`childCounts`), and `visible` is memoised on identity so a bare focus move no longer hands Alpine a fresh array to rebuild from. Worth remembering as a shape: **an O(n) lookup inside a per-row binding is O(n²), and it is invisible until there is data.**
 

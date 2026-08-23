@@ -278,7 +278,7 @@
               data-search
               type="text"
               placeholder="Filter todos…"
-              :value="state.query"
+              x-model="searchDraft"
               x-init="$watch('state.searchOpen', open => open && $nextTick(() => $el.focus()))"
               class="w-full rounded-[var(--radius)] border bg-transparent px-3 py-1.5 text-[0.8125rem] outline-none"
               style="border-color: var(--border)"
