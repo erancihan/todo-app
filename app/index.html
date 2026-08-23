@@ -24,6 +24,10 @@
   </head>
   <body class="min-h-screen">
     <div id="app" x-data="daybook" class="flex min-h-screen">
+      <!-- The sidebar comes first in the DOM, so give the keyboard a way past it
+           straight to the thing the app is actually for. -->
+      <a href="#todo-list" class="sr-only skip-link">Skip to the todo list</a>
+
       <!-- CollectionsSidebar (docs/04-ux-and-interaction.md §8, Screen 1): 240px,
            collapsible to a 56px icon rail. The account/host switcher the doc puts
            above it belongs to Phase 4 (sync), so it is deliberately absent —
@@ -177,6 +181,7 @@
           <div
             x-show="state.error"
             x-cloak
+            role="alert"
             class="mb-4 rounded-[var(--radius)] border px-3 py-2 text-[0.8125rem]"
             style="border-color: var(--destructive); color: var(--destructive)"
             x-text="state.error"
@@ -283,11 +288,28 @@
 
           <!-- The list. `tabindex` so it can hold focus in LIST mode; the keydown
                listener is global, registered by the controller. -->
-          <ul data-list tabindex="0" class="outline-none" role="tree" aria-label="Todos">
+          <!-- The list holds focus itself and points `aria-activedescendant` at
+               the focused row, which is how a screen reader is told the cursor
+               moved: the rows are not individually focusable, because that would
+               fight the single-keystroke verbs. -->
+          <ul
+            data-list
+            id="todo-list"
+            tabindex="0"
+            class="outline-none"
+            role="tree"
+            :aria-label="state.detailId ? 'Sub-items' : 'Todos'"
+            :aria-activedescendant="state.focusedId ? `row-${state.focusedId}` : null"
+            :aria-busy="state.busy"
+          >
             <template x-for="node in rows()" :key="node.id">
               <li
                 role="treeitem"
+                :id="`row-${node.id}`"
                 :aria-selected="isFocused(node.id)"
+                :aria-level="rowIndent(node) + 1"
+                :aria-expanded="node.hasChildren ? String(!node.collapsed) : null"
+                :aria-label="`${node.title || 'Untitled'}, ${node.status.replace('_', ' ')}`"
                 :style="`margin-left: ${rowIndent(node) * 20}px`"
                 class="rounded-[var(--radius-sm)]"
                 :class="isFocused(node.id) ? 'bg-muted shadow-[inset_2px_0_0_var(--primary)]' : ''"
@@ -315,6 +337,8 @@
 
                   <button
                     type="button"
+                    role="checkbox"
+                    :aria-checked="node.status === 'done'"
                     class="mt-[3px] size-[14px] shrink-0 rounded-[3px] border"
                     :style="node.status === 'done'
                       ? 'background: var(--success); border-color: var(--success)'
@@ -774,6 +798,9 @@
             @click="closeOverlays(); tagDraft = ''"
           >
             <div
+              role="dialog"
+              aria-modal="true"
+              aria-label="Tags"
               class="w-full max-w-md rounded-[var(--radius-lg)] border p-4"
               style="border-color: var(--border); background: var(--popover)"
               @click.stop
@@ -831,6 +858,9 @@
         @click="closeOverlays(); collectionDraft = ''"
       >
         <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Collections"
           class="w-full max-w-md rounded-[var(--radius-lg)] border p-4"
           style="border-color: var(--border); background: var(--popover)"
           @click.stop
@@ -889,6 +919,9 @@
         @click="state.cheatSheetOpen = false"
       >
         <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Keyboard shortcuts"
           class="max-h-[80vh] w-full max-w-2xl overflow-y-auto rounded-[var(--radius-lg)] border p-5"
           style="border-color: var(--border); background: var(--popover)"
           @click.stop
@@ -922,6 +955,9 @@
         @click="state.paletteOpen = false; paletteQuery = ''"
       >
         <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Command palette"
           class="w-full max-w-lg overflow-hidden rounded-[var(--radius-lg)] border"
           style="border-color: var(--border); background: var(--popover)"
           @click.stop

@@ -1024,6 +1024,16 @@ export class ListController {
   }
 
   closeOverlays() {
+    // An overlay's input holds DOM focus while it is open, so closing one drops
+    // focus onto `<body>` and the next keystroke reaches nothing. Hand it back
+    // to the list, which is where the caret was before the overlay opened.
+    const wasOpen =
+      this.state.cheatSheetOpen ||
+      this.state.paletteOpen ||
+      this.state.tagEditorOpen ||
+      this.state.collectionPickerOpen;
+    if (wasOpen) this.host.closeEditor();
+
     this.patch({
       cheatSheetOpen: false,
       paletteOpen: false,

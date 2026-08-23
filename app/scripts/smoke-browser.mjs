@@ -253,6 +253,48 @@ try {
     `${JSON.stringify(bodyBeforeDetail)} → ${JSON.stringify(bodyAfterDetail)}`,
   );
 
+  // --- accessibility contract ---------------------------------------------
+  // The list is a single focus stop that moves `aria-activedescendant`, because
+  // making every row focusable would fight the single-keystroke verbs. That
+  // means the attribute IS how a screen reader learns the cursor moved.
+  const a11y = await page.evaluate(() => {
+    const ul = document.querySelector("[data-list]");
+    const rows = [...ul.querySelectorAll("li[role=treeitem]")];
+    return {
+      active: ul.getAttribute("aria-activedescendant"),
+      ids: rows.map((r) => r.id),
+      levels: rows.map((r) => r.getAttribute("aria-level")),
+      labelled: rows.every((r) => (r.getAttribute("aria-label") ?? "").length > 0),
+      skip: Boolean(document.querySelector("a.skip-link")),
+    };
+  });
+  check(
+    "the focused row is announced via aria-activedescendant",
+    Boolean(a11y.active) && a11y.ids.includes(a11y.active),
+    JSON.stringify(a11y).slice(0, 200),
+  );
+  check(
+    "every row carries a level and a label",
+    a11y.labelled && a11y.levels.every(Boolean),
+    JSON.stringify(a11y.levels),
+  );
+  check("there is a skip link past the sidebar", a11y.skip);
+
+  // Overlays are dialogs, and closing one hands focus back to the list rather
+  // than dropping it on <body>, where the next keystroke would reach nothing.
+  await page.keyboard.press("t");
+  await page.waitForTimeout(500);
+  const dialog = await page.evaluate(() => {
+    const open = [...document.querySelectorAll("[role=dialog]")].find((d) => d.offsetParent);
+    return open ? { modal: open.getAttribute("aria-modal"), label: open.getAttribute("aria-label") } : null;
+  });
+  check("the tag editor is a labelled modal dialog", dialog?.modal === "true" && Boolean(dialog?.label), JSON.stringify(dialog));
+
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(600);
+  const refocused = await page.evaluate(() => document.activeElement?.hasAttribute("data-list"));
+  check("closing an overlay returns focus to the list", refocused === true);
+
   // --- the EOD report -----------------------------------------------------
   await page.keyboard.press("Control+Shift+E");
   await page.waitForTimeout(1200);
