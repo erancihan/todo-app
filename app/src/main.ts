@@ -155,6 +155,15 @@ interface AppComponent {
   rowIndent(node: NodeView): number;
   stamp(ms: number | null | undefined): string;
   promoteFromDetail(node: NodeView, event: Event): void;
+  // -- drag to reorder
+  dragging: string | null;
+  dropTarget: { id: string; where: "before" | "inside" | "after" } | null;
+  onDragStart(node: NodeView, event: DragEvent): void;
+  onDragOver(node: NodeView, event: DragEvent): void;
+  onDragLeave(node: NodeView): void;
+  onDrop(node: NodeView, event: DragEvent): void;
+  onDragEnd(): void;
+  dropClass(node: NodeView): string;
   // -- EOD report (Screen 4)
   openReport(): void;
   closeReport(): void;
@@ -351,6 +360,8 @@ Alpine.data("daybook", (): AppComponent => {
     detailParent: null,
     detailTagDraft: "",
     searchDraft: "",
+    dragging: null,
+    dropTarget: null,
     toastMessage: null,
     theme: "dark",
     density: "dense",
@@ -658,6 +669,70 @@ Alpine.data("daybook", (): AppComponent => {
       event.stopPropagation();
       controller.focus(node.id);
       void controller.dispatch("promote");
+    },
+
+    // -- drag to reorder -----------------------------------------------------
+
+    onDragStart(node, event) {
+      this.dragging = node.id;
+      // Some text has to be set or Firefox refuses to start the drag at all.
+      event.dataTransfer?.setData("text/plain", node.id);
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+    },
+    onDragOver(node, event) {
+      const source = this.dragging;
+      // Dropping a node into its own subtree would build a cycle, so those rows
+      // stay inert rather than showing an indicator that cannot be honoured.
+      if (!source || controller.isAncestorOf(source, node.id)) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+
+      // Thirds: the outer bands reorder as a sibling, the middle band nests.
+      // That is the standard tree gesture, and without the middle band a mouse
+      // could reorder but never re-parent.
+      const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
+      const ratio = (event.clientY - box.top) / box.height;
+      const where = ratio < 0.3 ? "before" : ratio > 0.7 ? "after" : "inside";
+      if (this.dropTarget?.id !== node.id || this.dropTarget?.where !== where) {
+        this.dropTarget = { id: node.id, where };
+      }
+    },
+    onDragLeave(node) {
+      if (this.dropTarget?.id === node.id) this.dropTarget = null;
+    },
+    onDrop(node, event) {
+      event.preventDefault();
+      const source = this.dragging;
+      const target = this.dropTarget;
+      this.dragging = null;
+      this.dropTarget = null;
+      if (!source || !target || target.id !== node.id) return;
+
+      if (target.where === "inside") {
+        // Onto the front of its children, so a drop lands where the pointer is
+        // rather than at the bottom of a list you may not be able to see.
+        void controller.moveTo(source, node.id, null);
+        return;
+      }
+      const parent = node.parentId ?? null;
+      if (target.where === "after") {
+        void controller.moveTo(source, parent, node.id);
+        return;
+      }
+      // "Before this row" is "after the row above it, at the same level".
+      const siblings = this.state.nodes.filter((n) => (n.parentId ?? null) === parent);
+      const index = siblings.findIndex((n) => n.id === node.id);
+      void controller.moveTo(source, parent, index > 0 ? siblings[index - 1]!.id : null);
+    },
+    onDragEnd() {
+      this.dragging = null;
+      this.dropTarget = null;
+    },
+    dropClass(node) {
+      if (this.dragging === node.id) return "opacity-40";
+      if (this.dropTarget?.id !== node.id) return "";
+      if (this.dropTarget.where === "inside") return "drop-inside";
+      return this.dropTarget.where === "before" ? "drop-before" : "drop-after";
     },
 
     // -- EOD report ----------------------------------------------------------

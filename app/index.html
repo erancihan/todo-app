@@ -312,12 +312,28 @@
                 :aria-label="`${node.title || 'Untitled'}, ${node.status.replace('_', ' ')}`"
                 :style="`margin-left: ${rowIndent(node) * 20}px`"
                 class="rounded-[var(--radius-sm)]"
-                :class="isFocused(node.id) ? 'bg-muted shadow-[inset_2px_0_0_var(--primary)]' : ''"
+                :class="`${isFocused(node.id) ? 'bg-muted shadow-[inset_2px_0_0_var(--primary)]' : ''} ${dropClass(node)}`"
+                @dragover="onDragOver(node, $event)"
+                @dragleave="onDragLeave(node)"
+                @drop="onDrop(node, $event)"
               >
                 <div
                   class="row-dense group flex items-start gap-1.5"
                   @click="onRowClick(node.id, $event)"
                 >
+                  <!-- Drag handle. `draggable` sits here rather than on the row
+                       so a text selection inside the row still works. -->
+                  <span
+                    draggable="true"
+                    class="mt-[3px] -ml-1 shrink-0 cursor-grab text-muted-foreground opacity-0 group-hover:opacity-100 active:cursor-grabbing"
+                    :class="isFocused(node.id) ? 'opacity-60' : ''"
+                    title="Drag to reorder"
+                    aria-hidden="true"
+                    @dragstart="onDragStart(node, $event)"
+                    @dragend="onDragEnd()"
+                    @click.stop
+                    >⠿</span
+                  >
                   <!-- Disclosure chevron. Keeps its slot on leaves so titles stay
                        aligned down the column. -->
                   <button

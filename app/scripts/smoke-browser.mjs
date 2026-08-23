@@ -340,6 +340,55 @@ try {
   const bodyText = await page.locator("body").textContent();
   check("the captured todo is still there", bodyText.includes("Ship EOD report v1"));
 
+  // --- drag to reorder ----------------------------------------------------
+  // The keyboard path is covered above; this is the only way a mouse can
+  // reorder or re-parent at all.
+  const orderBefore = await page.evaluate(() =>
+    window.Alpine.$data(document.getElementById("app")).state.nodes.map((n) => n.title),
+  );
+  if (orderBefore.length >= 2) {
+    const treeRows = page.locator("li[role=treeitem]");
+    const last = orderBefore.length - 1;
+    await treeRows.nth(last).hover();
+    await page.waitForTimeout(300);
+    const grip = await treeRows.nth(last).locator('[draggable="true"]').boundingBox();
+    const target = await treeRows.nth(0).boundingBox();
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
+    await page.mouse.down();
+    // Settle in the top band, which means "put it before this row".
+    await page.mouse.move(target.x + 250, target.y + target.height * 0.15, { steps: 10 });
+    // No assertion on the drop indicator here. Chromium does not service CDP
+    // evaluations while a native drag loop is running, so the class cannot be
+    // observed mid-drag from this harness — and a check that cannot see its
+    // subject is just a flaky test. The indicator is verified by screenshot;
+    // what *is* checkable is that the band the pointer settled in produced the
+    // right move, which the two assertions below do.
+    await page.mouse.up();
+    await page.waitForTimeout(1500);
+
+    const orderAfter = await page.evaluate(() =>
+      window.Alpine.$data(document.getElementById("app")).state.nodes.map((n) => n.title),
+    );
+    check(
+      "dropping a row above another reorders it",
+      orderAfter[0] === orderBefore[last] && orderAfter.length === orderBefore.length,
+      `${JSON.stringify(orderBefore)} → ${JSON.stringify(orderAfter)}`,
+    );
+
+    // A structural move has to put the row back where it came from, not just
+    // under the right parent.
+    await page.keyboard.press("u");
+    await page.waitForTimeout(1500);
+    const undone = await page.evaluate(() =>
+      window.Alpine.$data(document.getElementById("app")).state.nodes.map((n) => n.title),
+    );
+    check(
+      "a drag can be undone",
+      JSON.stringify(undone) === JSON.stringify(orderBefore),
+      `${JSON.stringify(orderBefore)} → ${JSON.stringify(undone)}`,
+    );
+  }
+
   // --- image attachments --------------------------------------------------
   // Bytes never enter the body; it carries `![](attachment:<sha256>)` and the
   // blob table holds the image under that hash.

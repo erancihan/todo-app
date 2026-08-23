@@ -966,6 +966,49 @@ export class ListController {
   }
 
   /**
+   * Move a node under `parentId`, positioned after `afterId` (null = first).
+   *
+   * The mouse counterpart to `Tab`/`Shift+Tab` and `o`/`O`/`a`. Undo restores
+   * both the old parent *and* the old preceding sibling, because a structural
+   * move that only remembers the parent puts the row back at the wrong height.
+   */
+  async moveTo(id: string, parentId: string | null, afterId: string | null): Promise<void> {
+    const node = this.state.nodes.find((n) => n.id === id);
+    if (!node) return;
+
+    // Refuse to drop a node inside its own subtree — the engine would build a
+    // cycle and the row would vanish from the tree walk.
+    if (parentId && this.isAncestorOf(id, parentId)) return;
+
+    const previousParent = node.parentId ?? null;
+    const siblings = this.state.nodes.filter((n) => (n.parentId ?? null) === previousParent);
+    const index = siblings.findIndex((n) => n.id === id);
+    const previousAfter = index > 0 ? siblings[index - 1]!.id : null;
+    if (previousParent === parentId && previousAfter === afterId) return;
+
+    this.remember({
+      label: "move",
+      focusId: id,
+      undo: () => this.engine.moveNode(id, previousParent, previousAfter),
+      redo: () => this.engine.moveNode(id, parentId, afterId),
+    });
+    return this.run(() => this.engine.moveNode(id, parentId, afterId));
+  }
+
+  /** Whether `id` is an ancestor of `candidate` (or the same node). */
+  isAncestorOf(id: string, candidate: string): boolean {
+    if (id === candidate) return true;
+    let cursor: string | null | undefined = this.state.nodes.find(
+      (n) => n.id === candidate,
+    )?.parentId;
+    while (cursor) {
+      if (cursor === id) return true;
+      cursor = this.state.nodes.find((n) => n.id === cursor)?.parentId;
+    }
+    return false;
+  }
+
+  /**
    * Set or clear a due date, undoably.
    *
    * The date arrives as a local `YYYY-MM-DD` from an `<input type="date">` and is

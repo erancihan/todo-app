@@ -17,6 +17,7 @@ Sibling docs: [README](README.md) · [01 — Product Requirements](docs/01-produ
 | **Phase 2** — sync + images | **Not started.** The relay crate exists as a skeleton and serves nothing. |
 | **Phase 3** — EOD report + polish | **Mostly done.** Report engine, report view, detail view, sidebar, density/theme, reduced-motion, copy-as-markdown all ship. Inline thumbnails wait on Phase 2. |
 | **Multi-tab browser** | **Done.** One tab holds the OPFS database and the others call it through a Web Lock + `BroadcastChannel`; the leader's tab closing promotes a waiter automatically. |
+| **Drag-to-reorder** | **Done** for pointer input; touch still needs a long-press path. |
 | **Attachments** | **Local half done** — paste/drop, SHA-256 content addressing, inline rendering. The sync channel is Phase 2. |
 | **Phase 4** — mobile hardening + v1 | **Not started.** |
 
@@ -81,10 +82,10 @@ The `/` filter is also debounced by 120 ms, so a query is applied once when typi
 
 **What the measurement found, and what was fixed:** the collapse was not rendering volume. It was two row bindings that each scanned the whole node list — `childCount` filtered all *n* nodes once per row, making every render O(n²), which at 2000 todos is four million comparisons per keystroke. Those lookups are now built once per change in the controller (`childCounts`), and `visible` is memoised on identity so a bare focus move no longer hands Alpine a fresh array to rebuild from. Worth remembering as a shape: **an O(n) lookup inside a per-row binding is O(n²), and it is invisible until there is data.**
 
-### Drag-to-reorder
-The keyboard path is complete (`Tab`/`Shift+Tab` to nest, `o`/`O`/`a` to place). Fractional indexing means a drop is a single `move_node` call, so the engine side is done — this is purely a pointer-interaction build, including a touch story and an accessible fallback.
+### Drag-to-reorder on touch
+**Pointer drag ships** — a handle on hover, thirds for before/inside/after, a drop indicator, and an undo that restores both the old parent and the old position. What is missing is the touch story: HTML5 drag events do not fire on touch, so a phone still has only the keyboard and the row menus.
 
-**First step:** a drag handle on the row's hover affordances, `pointerdown`/`pointermove` with a drop indicator, resolving to `moveNode(id, newParent, after)`.
+**First step:** a long-press pointer-events path that reuses the same band logic and calls the same `moveTo`. The decision of where a drop lands is already separated from how the gesture is delivered.
 
 ### Lucide icons
 Icons are currently hand-inlined SVG. That is fine at this size and adds no dependency; a real icon set is worth it when the count grows past what one file should hold.
