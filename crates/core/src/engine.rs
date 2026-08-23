@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::b64;
 use crate::body::{BodyCrdt, BodyUpdate, YrsBody};
 use crate::event::EventType;
-use crate::hlc::HlcClock;
+use crate::hlc::{Hlc, HlcClock};
 use crate::ids::{new_id, DeviceId};
 use crate::node::{Kind, Status, MAX_DEPTH};
 use crate::order_key;
@@ -136,17 +136,30 @@ impl<S: Store> Engine<S> {
         self.clock.borrow_mut().now().wall_ms as i64
     }
 
+    /// One HLC reading, to be shared by everything a single operation writes.
+    ///
+    /// Reading the clock separately for the row and for its event let the two
+    /// land a millisecond apart, so a node's `updated_at` and the `occurred_ms`
+    /// of the event that caused it disagreed. Anything correlating the tree with
+    /// the log then saw one moment as two — the EOD report's "touched before this
+    /// range" test flickered on exactly that.
+    fn stamp(&self) -> Hlc {
+        self.clock.borrow_mut().now()
+    }
+
     /// Stamp and append an event. Called inside the caller's transaction, never
-    /// on its own — a change and its event commit together or not at all.
+    /// on its own — a change and its event commit together or not at all, and
+    /// carry the same timestamp.
     fn emit(
         &self,
+        at: &Hlc,
         node_id: &str,
         kind: EventType,
         from: Option<&str>,
         to: Option<&str>,
         payload: Option<&str>,
     ) -> Result<()> {
-        let hlc = self.clock.borrow_mut().now();
+        let hlc = at;
         let type_str = serde_json::to_value(kind)
             .ok()
             .and_then(|v| v.as_str().map(str::to_owned))
@@ -171,8 +184,7 @@ impl<S: Store> Engine<S> {
         Ok(())
     }
 
-    fn touch(&self, node_id: &str) -> Result<()> {
-        let hlc = self.clock.borrow_mut().now();
+    fn touch(&self, node_id: &str, hlc: &Hlc) -> Result<()> {
         self.store.execute(
             "UPDATE node SET updated_at = ?, hlc = ? WHERE account_id = ? AND id = ?",
             &[
@@ -245,6 +257,7 @@ impl<S: Store> Engine<S> {
         title: &str,
         after: Option<&str>,
     ) -> Result<NodeView> {
+        let at = self.stamp();
         if let Some(parent) = parent_id {
             let depth = self.depth_of(parent)?;
             if depth + 1 >= MAX_DEPTH {
@@ -256,8 +269,8 @@ impl<S: Store> Engine<S> {
 
         let id = new_id().to_string();
         let order_key = self.order_key_between(parent_id, after)?;
-        let now = self.now_ms();
-        let hlc = self.clock.borrow_mut().now().to_string();
+        let now = at.wall_ms as i64;
+        let hlc = at.to_string();
         // A child starts life as a checklist item; a root starts as a full task.
         let kind = if parent_id.is_some() {
             Kind::ChecklistItem
@@ -282,7 +295,7 @@ impl<S: Store> Engine<S> {
                     hlc.as_str().into(),
                 ],
             )?;
-            self.emit(&id, EventType::Created, None, Some(title), None)
+            self.emit(&at, &id, EventType::Created, None, Some(title), None)
         })?;
 
         self.node(&id)?
@@ -405,6 +418,7 @@ impl<S: Store> Engine<S> {
     }
 
     pub fn set_title(&self, id: &str, title: &str) -> Result<()> {
+        let at = self.stamp();
         let previous = self.node(id)?.map(|n| n.title).unwrap_or_default();
         if previous == title {
             return Ok(());
@@ -414,8 +428,15 @@ impl<S: Store> Engine<S> {
                 "UPDATE node SET title = ? WHERE account_id = ? AND id = ?",
                 &[title.into(), self.account(), id.into()],
             )?;
-            self.touch(id)?;
-            self.emit(id, EventType::Updated, Some(&previous), Some(title), None)
+            self.touch(id, &at)?;
+            self.emit(
+                &at,
+                id,
+                EventType::Updated,
+                Some(&previous),
+                Some(title),
+                None,
+            )
         })
     }
 
@@ -427,6 +448,7 @@ impl<S: Store> Engine<S> {
     /// against the current text and apply the minimal splice — which is what the
     /// user actually did, and what a peer needs to merge correctly.
     pub fn set_body(&self, id: &str, markdown: &str) -> Result<()> {
+        let at = self.stamp();
         let Some(row) = self.store.query_one(
             "SELECT body_md, body_state, title FROM node \
              WHERE account_id = ? AND id = ? AND deleted = 0",
@@ -478,10 +500,11 @@ impl<S: Store> Engine<S> {
                     &[next_title.as_str().into(), self.account(), id.into()],
                 )?;
             }
-            self.touch(id)?;
+            self.touch(id, &at)?;
             // Bodies change constantly while typing; the log records that the body
             // changed, not every keystroke's before/after.
             self.emit(
+                &at,
                 id,
                 EventType::Updated,
                 None,
@@ -502,6 +525,7 @@ impl<S: Store> Engine<S> {
     }
 
     pub fn set_status(&self, id: &str, status: Status) -> Result<()> {
+        let at = self.stamp();
         let Some(node) = self.node(id)? else {
             return Err(CoreError::Store(format!("no such node: {id}")));
         };
@@ -509,7 +533,7 @@ impl<S: Store> Engine<S> {
             return Ok(());
         }
 
-        let now = self.now_ms();
+        let now = at.wall_ms as i64;
         let completed_at: SqlValue = if status.is_done() {
             now.into()
         } else {
@@ -526,7 +550,7 @@ impl<S: Store> Engine<S> {
                     id.into(),
                 ],
             )?;
-            self.touch(id)?;
+            self.touch(id, &at)?;
 
             // Three distinct event types, because the report reads them
             // differently: `completed` is an accomplishment, `reopened` undoes
@@ -539,6 +563,7 @@ impl<S: Store> Engine<S> {
                 EventType::StatusChanged
             };
             self.emit(
+                &at,
                 id,
                 kind,
                 Some(node.status.as_str()),
@@ -569,6 +594,7 @@ impl<S: Store> Engine<S> {
     /// its place in the tree, and simply gains the capabilities of a full todo
     /// (docs/03-data-model.md §6).
     pub fn promote(&self, id: &str) -> Result<()> {
+        let at = self.stamp();
         let Some(node) = self.node(id)? else {
             return Err(CoreError::Store(format!("no such node: {id}")));
         };
@@ -580,8 +606,8 @@ impl<S: Store> Engine<S> {
                 "UPDATE node SET promoted = 1, kind = ? WHERE account_id = ? AND id = ?",
                 &[Kind::Task.as_str().into(), self.account(), id.into()],
             )?;
-            self.touch(id)?;
-            self.emit(id, EventType::Promoted, None, None, None)
+            self.touch(id, &at)?;
+            self.emit(&at, id, EventType::Promoted, None, None, None)
         })
     }
 
@@ -642,6 +668,7 @@ impl<S: Store> Engine<S> {
     /// record and demotion is rare — but undo needs it, and an undo that cannot
     /// reverse the last action is not undo.
     pub fn demote(&self, id: &str) -> Result<()> {
+        let at = self.stamp();
         let Some(node) = self.node(id)? else {
             return Err(CoreError::Store(format!("no such node: {id}")));
         };
@@ -660,8 +687,9 @@ impl<S: Store> Engine<S> {
                 "UPDATE node SET promoted = 0, kind = ? WHERE account_id = ? AND id = ?",
                 &[kind.as_str().into(), self.account(), id.into()],
             )?;
-            self.touch(id)?;
+            self.touch(id, &at)?;
             self.emit(
+                &at,
                 id,
                 EventType::Updated,
                 Some("promoted"),
@@ -678,6 +706,7 @@ impl<S: Store> Engine<S> {
     /// (docs/03-data-model.md §5.4) and resurrecting it would fight the merge
     /// rules. Phase 2 must gate this on the causal watermark.
     pub fn restore_node(&self, id: &str) -> Result<usize> {
+        let at = self.stamp();
         let mut restored = vec![id.to_owned()];
         let mut cursor = 0;
         while cursor < restored.len() {
@@ -699,6 +728,7 @@ impl<S: Store> Engine<S> {
                     &[self.account(), node_id.as_str().into()],
                 )?;
                 self.emit(
+                    &at,
                     node_id,
                     EventType::Updated,
                     None,
@@ -753,6 +783,7 @@ impl<S: Store> Engine<S> {
 
     /// Reparent and/or reposition a node. One `order_key` is written; no reindex.
     pub fn move_node(&self, id: &str, new_parent: Option<&str>, after: Option<&str>) -> Result<()> {
+        let at = self.stamp();
         if let Some(parent) = new_parent {
             if self.would_cycle(id, parent)? {
                 return Err(CoreError::Store(
@@ -778,8 +809,9 @@ impl<S: Store> Engine<S> {
                     id.into(),
                 ],
             )?;
-            self.touch(id)?;
+            self.touch(id, &at)?;
             self.emit(
+                &at,
                 id,
                 EventType::Updated,
                 None,
@@ -809,6 +841,7 @@ impl<S: Store> Engine<S> {
     /// the delete propagates properly in Phase 2 rather than relying on a peer
     /// re-deriving the cascade.
     pub fn delete_node(&self, id: &str) -> Result<usize> {
+        let at = self.stamp();
         let mut doomed = vec![id.to_owned()];
         let mut cursor = 0;
         while cursor < doomed.len() {
@@ -818,7 +851,7 @@ impl<S: Store> Engine<S> {
             cursor += 1;
         }
 
-        let now = self.now_ms();
+        let now = at.wall_ms as i64;
         self.store.transaction(|| {
             for node_id in &doomed {
                 self.store.execute(
@@ -826,6 +859,7 @@ impl<S: Store> Engine<S> {
                     &[now.into(), self.account(), node_id.as_str().into()],
                 )?;
                 self.emit(
+                    &at,
                     node_id,
                     EventType::Updated,
                     None,
@@ -880,6 +914,7 @@ impl<S: Store> Engine<S> {
     /// Find or create a tag by name, then attach it. Tag names are the vocabulary;
     /// typing `#urgent` twice must not produce two tags.
     pub fn add_tag(&self, node_id: &str, name: &str) -> Result<TagView> {
+        let at = self.stamp();
         let name = name.trim().trim_start_matches('#');
         if name.is_empty() {
             return Err(CoreError::Store("tag name cannot be empty".into()));
@@ -926,8 +961,8 @@ impl<S: Store> Engine<S> {
             }
         };
 
-        let now = self.now_ms();
-        let hlc = self.clock.borrow_mut().now().to_string();
+        let now = at.wall_ms as i64;
+        let hlc = at.to_string();
         self.store.transaction(|| {
             self.store.execute(
                 "INSERT INTO node_tag (account_id, node_id, tag_id, added_at, deleted, hlc) \
@@ -942,7 +977,7 @@ impl<S: Store> Engine<S> {
                     hlc.as_str().into(),
                 ],
             )?;
-            self.emit(node_id, EventType::Tagged, None, Some(&tag.name), None)
+            self.emit(&at, node_id, EventType::Tagged, None, Some(&tag.name), None)
         })?;
 
         Ok(tag)
@@ -950,6 +985,7 @@ impl<S: Store> Engine<S> {
 
     /// Un-tag: tombstone the join, never delete the row, so the removal merges.
     pub fn remove_tag(&self, node_id: &str, tag_id: &str) -> Result<()> {
+        let at = self.stamp();
         let hlc = self.clock.borrow_mut().now().to_string();
         self.store.transaction(|| {
             self.store.execute(
@@ -962,7 +998,7 @@ impl<S: Store> Engine<S> {
                     tag_id.into(),
                 ],
             )?;
-            self.emit(node_id, EventType::Untagged, Some(tag_id), None, None)
+            self.emit(&at, node_id, EventType::Untagged, Some(tag_id), None, None)
         })
     }
 
@@ -1068,6 +1104,7 @@ impl<S: Store> Engine<S> {
     /// Membership is many-to-many: adding to a second Collection does not remove
     /// the first. There is no single-select bucket anywhere in this model.
     pub fn add_to_collection(&self, node_id: &str, collection_id: &str) -> Result<()> {
+        let at = self.stamp();
         let hlc = self.clock.borrow_mut().now().to_string();
         self.store.transaction(|| {
             self.store.execute(
@@ -1083,6 +1120,7 @@ impl<S: Store> Engine<S> {
                 ],
             )?;
             self.emit(
+                &at,
                 node_id,
                 EventType::CollectionAdded,
                 None,
@@ -1093,6 +1131,7 @@ impl<S: Store> Engine<S> {
     }
 
     pub fn remove_from_collection(&self, node_id: &str, collection_id: &str) -> Result<()> {
+        let at = self.stamp();
         let hlc = self.clock.borrow_mut().now().to_string();
         self.store.transaction(|| {
             self.store.execute(
@@ -1106,6 +1145,7 @@ impl<S: Store> Engine<S> {
                 ],
             )?;
             self.emit(
+                &at,
                 node_id,
                 EventType::CollectionRemoved,
                 Some(collection_id),
@@ -1137,6 +1177,74 @@ impl<S: Store> Engine<S> {
                 occurred_ms: r[6].as_i64().unwrap_or(0),
             })
             .collect())
+    }
+
+    /// The timestamp of each node's most recent *user* event.
+    ///
+    /// The report needs "when was this last actually worked on", and the answer
+    /// has to come from the log rather than from `node.updated_at`: the row and
+    /// its event are stamped from two clock reads, so they can differ by a
+    /// millisecond, and mixing the two made "touched before this range" flicker
+    /// for anything created right on a range boundary. `carried_over` is excluded
+    /// because it is the report's own bookkeeping, not work.
+    pub fn last_event_ms(&self) -> Result<Vec<(String, i64)>> {
+        let rows = self.store.query(
+            "SELECT node_id, MAX(occurred_ms) FROM event WHERE account_id = ? \
+             AND type != 'carried_over' GROUP BY node_id",
+            &[self.account()],
+        )?;
+        Ok(rows
+            .iter()
+            .map(|r| (r[0].text_or_default(), r[1].as_i64().unwrap_or(0)))
+            .collect())
+    }
+
+    /// How many times each node has been carried into a later report.
+    ///
+    /// One grouped query rather than a per-node lookup: the report needs this for
+    /// every carried item at once, and the EOD view is the one screen where a
+    /// query-per-row would be felt.
+    pub fn carry_over_counts(&self) -> Result<Vec<(String, i64)>> {
+        let rows = self.store.query(
+            "SELECT node_id, COUNT(*) FROM event WHERE account_id = ? \
+             AND type = 'carried_over' GROUP BY node_id",
+            &[self.account()],
+        )?;
+        Ok(rows
+            .iter()
+            .map(|r| (r[0].text_or_default(), r[1].as_i64().unwrap_or(0)))
+            .collect())
+    }
+
+    /// Append a `carried_over` event stamped with the local day it belongs to.
+    ///
+    /// The day key lives in `payload` so [`Engine::commit_carry_over`] can ask
+    /// "did today already roll this one forward?" without re-deriving local
+    /// midnight from a UTC timestamp inside SQL.
+    pub(crate) fn emit_carry_over(&self, node_id: &str, day_key: &str) -> Result<()> {
+        let at = self.stamp();
+        self.store.transaction(|| {
+            self.emit(
+                &at,
+                node_id,
+                EventType::CarriedOver,
+                None,
+                None,
+                Some(day_key),
+            )
+        })
+    }
+
+    /// The account id as a bindable value — used by [`crate::report`], which
+    /// lives in a sibling module and cannot reach the private field.
+    pub(crate) fn account_value(&self) -> SqlValue {
+        self.account()
+    }
+
+    /// The engine's current wall clock, for tests that need a range around now.
+    #[cfg(test)]
+    pub(crate) fn now_for_test(&self) -> i64 {
+        self.now_ms()
     }
 
     /// Every event for one node, oldest first.
@@ -1441,6 +1549,45 @@ mod tests {
     }
 
     // -- the event log ------------------------------------------------------
+
+    #[test]
+    fn a_change_and_its_event_carry_the_same_timestamp() {
+        let e = engine();
+        let node = e.create_node(None, "task", None).unwrap();
+
+        let created = e
+            .events_for_node(&node.id)
+            .unwrap()
+            .into_iter()
+            .find(|ev| ev.r#type == "created")
+            .expect("no created event");
+        assert_eq!(
+            node.created_at, created.occurred_ms,
+            "the row and the event that made it were stamped from two clock reads"
+        );
+
+        e.set_title(&node.id, "renamed").unwrap();
+        let after = e.node(&node.id).unwrap().unwrap();
+        let last = e
+            .events_for_node(&node.id)
+            .unwrap()
+            .pop()
+            .expect("no events");
+        assert_eq!(
+            after.updated_at, last.occurred_ms,
+            "updated_at drifted from the event that caused it"
+        );
+
+        e.toggle_done(&node.id).unwrap();
+        let done = e.node(&node.id).unwrap().unwrap();
+        let completion = e
+            .events_for_node(&node.id)
+            .unwrap()
+            .into_iter()
+            .find(|ev| ev.r#type == "completed")
+            .expect("no completed event");
+        assert_eq!(done.completed_at, Some(completion.occurred_ms));
+    }
 
     #[test]
     fn every_state_change_writes_an_event() {

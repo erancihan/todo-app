@@ -54,6 +54,55 @@ export interface CollectionView {
   nodeCount: number;
 }
 
+/** Which of the EOD report's four buckets an item landed in (docs/03 §8.2). */
+export type Bucket = "created" | "updated" | "completed" | "carried_over";
+
+export type Grouping = "collection" | "tag" | "flat";
+
+/**
+ * What the report generator needs that it cannot work out for itself.
+ *
+ * The window and the UTC offset come from here rather than from Rust because the
+ * host is the only side that knows the viewer's local day boundary, DST included
+ * (docs/03 §9). Core stays a pure function of these inputs.
+ */
+export interface ReportOptions {
+  fromMs: number;
+  toMs: number;
+  tzOffsetMinutes: number;
+  dateLabel: string;
+  groupBy: Grouping;
+  dedup: boolean;
+  carryOverWindowDays: number;
+}
+
+export interface ReportItem {
+  nodeId: string;
+  title: string;
+  status: Status;
+  bucket: Bucket;
+  tags: string[];
+  depth: number;
+  completedMs: number | null;
+  dueMs: number | null;
+  promotedInRange: boolean;
+  slippedDays: number;
+}
+
+export interface ReportSection {
+  heading: string;
+  items: ReportItem[];
+}
+
+export interface Report {
+  title: string;
+  markdown: string;
+  sections: ReportSection[];
+  counts: { created: number; updated: number; completed: number; carriedOver: number };
+  carriedOverIds: string[];
+  duplicated: boolean;
+}
+
 export interface EventView {
   id: string;
   nodeId: string;
@@ -102,6 +151,9 @@ export interface EnginePort {
 
   eventsBetween(fromMs: number, toMs: number): Promise<EventView[]>;
   eventsForNode(nodeId: string): Promise<EventView[]>;
+
+  generateReport(options: ReportOptions): Promise<Report>;
+  commitCarryOver(nodeIds: string[], dayKey: string): Promise<number>;
 }
 
 /**
@@ -196,6 +248,12 @@ class TauriEnginePort implements EnginePort {
   }
   eventsForNode(nodeId: string) {
     return this.invoke<EventView[]>("events_for_node", { nodeId });
+  }
+  generateReport(options: ReportOptions) {
+    return this.invoke<Report>("generate_report", { options });
+  }
+  commitCarryOver(nodeIds: string[], dayKey: string) {
+    return this.invoke<number>("commit_carry_over", { nodeIds, dayKey });
   }
 }
 
@@ -318,6 +376,12 @@ class WasmEnginePort implements EnginePort {
   }
   eventsForNode(nodeId: string) {
     return this.call<EventView[]>("eventsForNode", nodeId);
+  }
+  generateReport(options: ReportOptions) {
+    return this.call<Report>("generateReport", options);
+  }
+  commitCarryOver(nodeIds: string[], dayKey: string) {
+    return this.call<number>("commitCarryOver", nodeIds, dayKey);
   }
 }
 

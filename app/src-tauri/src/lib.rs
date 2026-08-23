@@ -13,6 +13,7 @@ use std::sync::Mutex;
 
 use daybook_core::ids::DeviceId;
 use daybook_core::node::Status;
+use daybook_core::report::{Report, ReportOptions};
 use daybook_core::store::SqliteStore;
 use daybook_core::{CollectionView, Engine, EventView, NodeView, TagView};
 use tauri::Manager;
@@ -296,6 +297,32 @@ fn events_between(
         .map_err(to_err)
 }
 
+/// The EOD report. The window and UTC offset come from the WebView, which is the
+/// only side that knows the viewer's local day boundary.
+#[tauri::command]
+fn generate_report(state: tauri::State<'_, AppState>, options: ReportOptions) -> CmdResult<Report> {
+    state
+        .engine
+        .lock()
+        .unwrap()
+        .generate_report(&options)
+        .map_err(to_err)
+}
+
+#[tauri::command]
+fn commit_carry_over(
+    state: tauri::State<'_, AppState>,
+    node_ids: Vec<String>,
+    day_key: String,
+) -> CmdResult<usize> {
+    state
+        .engine
+        .lock()
+        .unwrap()
+        .commit_carry_over(&node_ids, &day_key)
+        .map_err(to_err)
+}
+
 #[tauri::command]
 fn events_for_node(
     state: tauri::State<'_, AppState>,
@@ -356,6 +383,8 @@ pub fn run() {
             remove_from_collection,
             events_between,
             events_for_node,
+            generate_report,
+            commit_carry_over,
         ])
         .run(tauri::generate_context!())
         .expect("error while running daybook");

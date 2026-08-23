@@ -30,6 +30,7 @@ pub mod ids;
 pub mod node;
 pub mod op;
 pub mod order_key;
+pub mod report;
 pub mod store;
 
 #[cfg(target_arch = "wasm32")]

@@ -23,6 +23,7 @@ use wasm_bindgen::prelude::*;
 use crate::engine::Engine;
 use crate::ids::DeviceId;
 use crate::node::Status;
+use crate::report::ReportOptions;
 use crate::store::{Row, SqlValue, Store};
 use crate::{CoreError, Result};
 
@@ -374,5 +375,27 @@ impl DaybookEngine {
     #[wasm_bindgen(js_name = eventsForNode)]
     pub fn events_for_node(&self, node_id: String) -> std::result::Result<JsValue, JsValue> {
         to_js(&self.inner.borrow().events_for_node(&node_id).map_err(err)?)
+    }
+
+    /// The EOD report. `options` is a [`crate::report::ReportOptions`] as a plain
+    /// JS object — the host owns the timezone, so it supplies the day window and
+    /// the UTC offset rather than core guessing either.
+    #[wasm_bindgen(js_name = generateReport)]
+    pub fn generate_report(&self, options: JsValue) -> std::result::Result<JsValue, JsValue> {
+        let options: ReportOptions = serde_wasm_bindgen::from_value(options)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        to_js(&self.inner.borrow().generate_report(&options).map_err(err)?)
+    }
+
+    #[wasm_bindgen(js_name = commitCarryOver)]
+    pub fn commit_carry_over(
+        &self,
+        node_ids: Vec<String>,
+        day_key: String,
+    ) -> std::result::Result<usize, JsValue> {
+        self.inner
+            .borrow()
+            .commit_carry_over(&node_ids, &day_key)
+            .map_err(err)
     }
 }
