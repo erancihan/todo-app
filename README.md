@@ -2,10 +2,28 @@
 
 > An offline-first, keyboard-driven task app for iOS, macOS, Windows, and the browser (Android from the same codebase; Linux via the browser build) that captures as fast as a notepad and auto-generates a shareable markdown end-of-day report from what you actually did.
 
-**Status: Phase 1 — MVP core (in progress).** The planning docs below lock the product, stack, data model, UX, and roadmap.
+**Status: Phase 3 — EOD report engine + polish (mostly done).** The planning docs below lock the product, stack, data model, UX, and roadmap; [`BACKLOG.md`](BACKLOG.md) is the honest ledger of what is *not* built and why.
 
 - **Phase 0 (proof-of-stack)** — partly green. The CRDT, browser/WASM, keymap, and desktop-shell criteria pass; the **iOS/Android criteria are outstanding** because they need a Mac and real devices. See [`spikes/README.md`](spikes/README.md) and the run book in [`spikes/mobile-README.md`](spikes/mobile-README.md).
-- **Phase 1 (MVP core)** — the capture loop, single-table NODE model, event log, ordering, promotion, tags, collections, search, undo/redo, and Obsidian-style inline live preview are implemented and run on **the browser and the Linux desktop**. Windows, macOS, iOS, and Android are untested here and are the owner's next targets.
+- **Phase 1 (MVP core)** — **done** on **the browser and the Linux desktop**: the capture loop, single-table NODE model, event log, ordering, promotion, tags, collections, search, undo/redo, and Obsidian-style inline live preview. Windows, macOS, iOS, and Android are untested here and are the owner's next targets.
+- **Phase 2 (sync + images)** — **not started.** The relay crate is a skeleton.
+- **Phase 3 (EOD report + polish)** — the deterministic report engine, the report view, the GitHub-issue detail view, the collections sidebar, due dates, `#tag`/`@collection` autocomplete, density and theme toggles, and an installable offline PWA all ship. Inline attachment thumbnails wait on Phase 2.
+
+The report is derived from the immutable event log and is byte-identical on both hosts:
+
+```markdown
+# EOD — 2026-08-23
+
+## Work
+- [ ] **Ship the EOD report v1**  `#reporting`
+  - [x] Query the event log by date range · done 07:21
+  - [ ] Carry-over logic
+
+## Uncollected
+- [x] **Fix sync retry backoff** · done 07:21
+
+_Created 2 · Updated 0 · Completed 2 · Carried over 0_
+```
 
 ---
 
@@ -17,6 +35,8 @@
 │   │   src/engine.rs    ← the Phase 1 engine: NODE CRUD, event log, ordering,
 │   │                      promotion, tags, collections. Written ONCE; both
 │   │                      hosts run this exact code.
+│   │   src/report.rs    ← the EOD report: log → buckets → grouped markdown.
+│   │                      Timezone-free by design; the host supplies the window.
 │   │   src/store.rs     ← the only place the two builds differ (see below)
 │   │   src/body.rs      ← BodyCrdt trait + yrs Y.Text
 │   │   src/wasm.rs      ← wasm32-only bindgen surface for the PWA
@@ -29,8 +49,11 @@
 │   │                    list-controller.ts mode, focus, what each key does
 │   │                    keymap.ts          the authoritative bindings
 │   │                    body-editor.ts     CodeMirror 6
+│   │                    live-preview.ts    Obsidian-style inline rendering
+│   │                    token-complete.ts  #tag / @collection autocomplete
 │   │                    db-worker.ts       sqlite-wasm + OPFS driver
 │   ├── src/main.ts    Alpine boot — the view layer, and only the view layer
+│   ├── public/        PWA manifest, icons, and the offline service worker
 │   └── src-tauri/     the Tauri v2 shell (desktop + mobile entry points)
 │
 ├── scripts/           run-linux-desktop.sh — headless desktop run + screenshot
@@ -154,6 +177,7 @@ Daybook is a full todo tracker first — collections, tags, promotable sub-items
 | [docs/03-data-model.md](docs/03-data-model.md) | Entities, ER description, CRDT/sync modeling, promotable sub-items, EOD report engine, example JSON. |
 | [docs/04-ux-and-interaction.md](docs/04-ux-and-interaction.md) | Full keymap table, editor, capture flow, promotion flow, design system + tokens, key screens. |
 | [docs/05-roadmap.md](docs/05-roadmap.md) | Phased milestones MVP → v1 → later, risks, open questions. |
+| [BACKLOG.md](BACKLOG.md) | What is not built, why, and the first step for each — including every recorded deviation from the docs. |
 
 ## MVP in One Line
 
