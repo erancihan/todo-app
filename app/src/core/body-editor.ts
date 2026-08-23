@@ -15,6 +15,7 @@ import { markdown } from "@codemirror/lang-markdown";
 import { EditorSelection, EditorState, type Extension } from "@codemirror/state";
 import { EditorView, keymap, placeholder } from "@codemirror/view";
 import { livePreview } from "./live-preview";
+import { tokenComplete, type TokenSources } from "./token-complete";
 
 export interface BodyEditorCallbacks {
   /** `Ctrl/Cmd+Enter`. */
@@ -23,6 +24,15 @@ export interface BodyEditorCallbacks {
   onExit(): void;
   /** Debounced autosave — the body is never lost by leaving it alone. */
   onChange(text: string): void;
+  /**
+   * Where `#tag` and `@collection` completions get their options and where an
+   * accepted one is applied.
+   *
+   * Supplied per instance rather than read from a module: the roving list editor
+   * and the detail view's editor act on different nodes, and a shared source
+   * would file a sub-item's tag onto the todo you were looking at.
+   */
+  tokens?: TokenSources;
 }
 
 /** How long typing must pause before an autosave fires. */
@@ -118,6 +128,7 @@ export class BodyEditor {
       keymap.of([...defaultKeymap, ...historyKeymap]),
       markdown(),
       livePreview(),
+      ...(this.callbacks.tokens ? [tokenComplete(this.callbacks.tokens)] : []),
       EditorView.lineWrapping,
       placeholder("Write markdown… Ctrl/Cmd+Enter to submit"),
       EditorView.updateListener.of((update) => {

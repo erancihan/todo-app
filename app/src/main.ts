@@ -10,6 +10,7 @@
 import Alpine from "alpinejs";
 import "./app.css";
 import { BodyEditor } from "./core/body-editor";
+import type { TokenSources } from "./core/token-complete";
 import {
   engine,
   isTauri,
@@ -181,6 +182,31 @@ Alpine.data("daybook", (): AppComponent => {
   let editor: BodyEditor | null = null;
   let controller: ListController;
 
+  /**
+   * `#tag` / `@collection` completion, bound to whichever node an editor edits.
+   *
+   * `target` is a getter, not a value: the roving editor moves between rows, so
+   * a captured id would file every tag onto the first row ever edited — the same
+   * trap the autosave callbacks avoid.
+   */
+  const tokenSources = (target: () => string | null): TokenSources => ({
+    tags: () => controller.snapshot.allTags.map((t) => t.name),
+    collections: () => controller.snapshot.allCollections.map((c) => c.name),
+    applyTag: (name) => {
+      const id = target();
+      if (id) void controller.addTag(id, name);
+    },
+    applyCollection: (name) => {
+      const id = target();
+      if (!id) return;
+      const existing = controller.snapshot.allCollections.find(
+        (c) => c.name.toLowerCase() === name.toLowerCase(),
+      );
+      if (existing) void controller.toggleCollection(id, existing.id);
+      else void controller.createCollection(name, id);
+    },
+  });
+
   /** Which row the editor is currently mounted into. */
   let mountedNodeId: string | null = null;
 
@@ -205,6 +231,7 @@ Alpine.data("daybook", (): AppComponent => {
         onSubmit: () => void controller.submit(),
         onExit: () => void controller.exitEdit(),
         onChange: (text) => controller.saveFocusedBody(text),
+        tokens: tokenSources(() => controller.snapshot.focusedId),
       });
     } else if (editor.element.parentElement !== slot) {
       slot.appendChild(editor.element);
@@ -241,6 +268,7 @@ Alpine.data("daybook", (): AppComponent => {
           (document.querySelector("[data-list]") as HTMLElement | null)?.focus();
         },
         onChange: (text) => controller.saveDetailBody(text),
+        tokens: tokenSources(() => controller.snapshot.detailId),
       });
     } else if (detailEditor.element.parentElement !== slot) {
       slot.appendChild(detailEditor.element);
