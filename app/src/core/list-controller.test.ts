@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ListController, localDayKey } from "./list-controller";
+import { dueDayValue, endOfLocalDay, ListController, localDayKey } from "./list-controller";
 import type { EnginePort, NodeView } from "./engine-port";
 
 /**
@@ -39,6 +39,7 @@ function fakeEngine(tree: NodeView[]): EnginePort {
     setTitle: vi.fn(stub),
     setBody: vi.fn(stub),
     setStatus: vi.fn(stub),
+    setDue: vi.fn(stub),
     toggleDone: vi.fn(stub),
     promote: vi.fn(stub),
     demote: vi.fn(stub),
@@ -808,6 +809,63 @@ describe("EOD report", () => {
     const calls = (engine.generateReport as ReturnType<typeof vi.fn>).mock.calls;
     expect(calls[calls.length - 1]![0].groupBy).toBe("tag");
     expect(controller.snapshot.reportDay).toBe(day);
+  });
+});
+
+describe("due dates", () => {
+  let engine: EnginePort;
+  let controller: ListController;
+
+  beforeEach(async () => {
+    engine = fakeEngine(TREE);
+    controller = new ListController(engine, host);
+    await controller.refresh();
+  });
+
+  it("a due date means the END of that local day", async () => {
+    await controller.setDue("root", "2026-08-23");
+    const ms = (engine.setDue as ReturnType<typeof vi.fn>).mock.calls[0]![1];
+
+    // "Due Friday" means by the end of Friday, not at the midnight it starts.
+    const midnight = new Date("2026-08-23T00:00:00").getTime();
+    expect(ms).toBeGreaterThan(midnight);
+    expect(ms).toBe(new Date("2026-08-24T00:00:00").getTime() - 1);
+  });
+
+  it("clearing passes null rather than a zero timestamp", async () => {
+    const withDue = TREE.map((n) => (n.id === "root" ? { ...n, dueAt: 123 } : n));
+    const e = fakeEngine(withDue);
+    const c = new ListController(e, host);
+    await c.refresh();
+
+    await c.setDue("root", null);
+    expect(e.setDue).toHaveBeenCalledWith("root", null);
+  });
+
+  it("setting the same date again does nothing", async () => {
+    const day = "2026-08-23";
+    const withDue = TREE.map((n) =>
+      n.id === "root" ? { ...n, dueAt: endOfLocalDay(day) } : n,
+    );
+    const e = fakeEngine(withDue);
+    const c = new ListController(e, host);
+    await c.refresh();
+
+    await c.setDue("root", day);
+    expect(e.setDue).not.toHaveBeenCalled();
+  });
+
+  it("a due date is undoable", async () => {
+    await controller.setDue("root", "2026-08-23");
+    expect(controller.snapshot.canUndo).toBe(true);
+
+    await controller.dispatch("undo");
+    expect(engine.setDue).toHaveBeenLastCalledWith("root", null);
+  });
+
+  it("round-trips through the date input's format", () => {
+    expect(dueDayValue(endOfLocalDay("2026-08-23"))).toBe("2026-08-23");
+    expect(dueDayValue(null)).toBe("");
   });
 });
 

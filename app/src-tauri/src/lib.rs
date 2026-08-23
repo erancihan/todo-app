@@ -297,6 +297,16 @@ fn events_between(
         .map_err(to_err)
 }
 
+#[tauri::command]
+fn set_due(state: tauri::State<'_, AppState>, id: String, due_ms: Option<i64>) -> CmdResult<()> {
+    state
+        .engine
+        .lock()
+        .unwrap()
+        .set_due(&id, due_ms)
+        .map_err(to_err)
+}
+
 /// The EOD report. The window and UTC offset come from the WebView, which is the
 /// only side that knows the viewer's local day boundary.
 #[tauri::command]
@@ -383,6 +393,7 @@ pub fn run() {
             remove_from_collection,
             events_between,
             events_for_node,
+            set_due,
             generate_report,
             commit_carry_over,
         ])

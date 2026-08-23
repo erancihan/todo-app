@@ -18,7 +18,12 @@ import {
   type ReportItem,
   type Status,
 } from "./core/engine-port";
-import { ListController, localDayKey, type ListState } from "./core/list-controller";
+import {
+  dueDayValue,
+  ListController,
+  localDayKey,
+  type ListState,
+} from "./core/list-controller";
 import { CHEAT_SHEET, PALETTE_COMMANDS } from "./core/commands";
 import { dismissToast, subscribeToasts, toast, type ToastMessage } from "./core/toast";
 
@@ -147,6 +152,8 @@ interface AppComponent {
   detailTagDraft: string;
   submitDetailTag(): void;
   dropDetailTag(tagId: string): void;
+  detailDueValue(): string;
+  setDetailDue(day: string): void;
 }
 
 Alpine.data("daybook", (): AppComponent => {
@@ -620,6 +627,12 @@ Alpine.data("daybook", (): AppComponent => {
     },
     dropDetailTag(tagId) {
       if (this.detail) void controller.removeTag(this.detail.id, tagId);
+    },
+    detailDueValue() {
+      return dueDayValue(this.detail?.dueAt ?? null);
+    },
+    setDetailDue(day) {
+      if (this.detail) void controller.setDue(this.detail.id, day || null);
     },
   };
 });

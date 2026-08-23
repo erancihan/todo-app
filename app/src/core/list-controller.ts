@@ -911,6 +911,28 @@ export class ListController {
   }
 
   /**
+   * Set or clear a due date, undoably.
+   *
+   * The date arrives as a local `YYYY-MM-DD` from an `<input type="date">` and is
+   * resolved to end-of-day local, because "due Friday" means "by the end of
+   * Friday", not "at midnight as Friday begins".
+   */
+  async setDue(id: string, day: string | null): Promise<void> {
+    const node = this.state.nodes.find((n) => n.id === id);
+    const previous = node?.dueAt ?? null;
+    const next = day ? endOfLocalDay(day) : null;
+    if (previous === next) return;
+
+    this.remember({
+      label: "due date",
+      focusId: id,
+      undo: () => this.engine.setDue(id, previous),
+      redo: () => this.engine.setDue(id, next),
+    });
+    return this.run(() => this.engine.setDue(id, next));
+  }
+
+  /**
    * Set an explicit status.
    *
    * `x` only ever swings between `todo` and `done`, so until the detail view's
@@ -1026,4 +1048,16 @@ export class ListController {
 export function localDayKey(date: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+/** The last millisecond of a local `YYYY-MM-DD`. */
+export function endOfLocalDay(day: string): number {
+  const date = new Date(`${day}T00:00:00`);
+  date.setDate(date.getDate() + 1);
+  return date.getTime() - 1;
+}
+
+/** A due timestamp back to the `YYYY-MM-DD` an `<input type="date">` wants. */
+export function dueDayValue(ms: number | null): string {
+  return ms ? localDayKey(new Date(ms)) : "";
 }

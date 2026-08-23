@@ -417,6 +417,33 @@ impl<S: Store> Engine<S> {
         Ok(true)
     }
 
+    /// Set or clear a due date, as UTC milliseconds.
+    ///
+    /// The host resolves "end of Friday" to an instant, the same way it resolves
+    /// the report's day window — core does not own a timezone.
+    pub fn set_due(&self, id: &str, due_ms: Option<i64>) -> Result<()> {
+        let at = self.stamp();
+        let previous = self.node(id)?.and_then(|n| n.due_at);
+        if previous == due_ms {
+            return Ok(());
+        }
+        self.store.transaction(|| {
+            self.store.execute(
+                "UPDATE node SET due_at = ? WHERE account_id = ? AND id = ?",
+                &[due_ms.into(), self.account(), id.into()],
+            )?;
+            self.touch(id, &at)?;
+            self.emit(
+                &at,
+                id,
+                EventType::Updated,
+                previous.map(|p| p.to_string()).as_deref(),
+                due_ms.map(|d| d.to_string()).as_deref(),
+                Some("due"),
+            )
+        })
+    }
+
     pub fn set_title(&self, id: &str, title: &str) -> Result<()> {
         let at = self.stamp();
         let previous = self.node(id)?.map(|n| n.title).unwrap_or_default();
@@ -1549,6 +1576,66 @@ mod tests {
     }
 
     // -- the event log ------------------------------------------------------
+
+    #[test]
+    fn a_due_date_can_be_set_and_cleared() {
+        let e = engine();
+        let node = e.create_node(None, "task", None).unwrap();
+        assert_eq!(node.due_at, None);
+
+        e.set_due(&node.id, Some(1_787_443_200_000)).unwrap();
+        assert_eq!(
+            e.node(&node.id).unwrap().unwrap().due_at,
+            Some(1_787_443_200_000)
+        );
+
+        e.set_due(&node.id, None).unwrap();
+        assert_eq!(e.node(&node.id).unwrap().unwrap().due_at, None);
+    }
+
+    #[test]
+    fn setting_the_same_due_date_writes_nothing() {
+        let e = engine();
+        let node = e.create_node(None, "task", None).unwrap();
+        e.set_due(&node.id, Some(1_000)).unwrap();
+        let before = e.events_for_node(&node.id).unwrap().len();
+
+        e.set_due(&node.id, Some(1_000)).unwrap();
+        assert_eq!(
+            e.events_for_node(&node.id).unwrap().len(),
+            before,
+            "a no-op re-save filled the report with `updated` noise"
+        );
+    }
+
+    #[test]
+    fn a_due_date_pulls_a_stale_todo_back_into_the_report() {
+        use crate::report::ReportOptions;
+        let e = engine();
+        let node = e.create_node(None, "Overdue thing", None).unwrap();
+        let touched = e.last_event_ms().unwrap()[0].1;
+
+        // Far outside the carry-over window: without a due date this is
+        // inventory, not today's news.
+        let mut options = ReportOptions {
+            from_ms: touched + 30 * 86_400_000,
+            to_ms: touched + 31 * 86_400_000,
+            date_label: "d".into(),
+            carry_over_window_days: 7,
+            ..Default::default()
+        };
+        assert_eq!(e.generate_report(&options).unwrap().counts.carried_over, 0);
+
+        e.set_due(&node.id, Some(options.from_ms + 1)).unwrap();
+        // `set_due` is itself an event, so the range has to start after it for
+        // this to test the due date rather than the touch.
+        options.from_ms = e.last_event_ms().unwrap()[0].1 + 1;
+        assert_eq!(
+            e.generate_report(&options).unwrap().counts.carried_over,
+            1,
+            "a due date in play did not keep the item in scope"
+        );
+    }
 
     #[test]
     fn a_change_and_its_event_carry_the_same_timestamp() {

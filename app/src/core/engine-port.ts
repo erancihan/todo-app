@@ -129,6 +129,8 @@ export interface EnginePort {
   setTitle(id: string, title: string): Promise<void>;
   setBody(id: string, markdown: string): Promise<void>;
   setStatus(id: string, status: Status): Promise<void>;
+  /** `null` clears the due date. Milliseconds, UTC. */
+  setDue(id: string, dueMs: number | null): Promise<void>;
   toggleDone(id: string): Promise<void>;
   promote(id: string): Promise<void>;
   demote(id: string): Promise<void>;
@@ -191,6 +193,9 @@ class TauriEnginePort implements EnginePort {
   }
   setStatus(id: string, status: Status) {
     return this.invoke<void>("set_status", { id, status });
+  }
+  setDue(id: string, dueMs: number | null) {
+    return this.invoke<void>("set_due", { id, dueMs });
   }
   toggleDone(id: string) {
     return this.invoke<void>("toggle_done", { id });
@@ -319,6 +324,9 @@ class WasmEnginePort implements EnginePort {
   }
   setStatus(id: string, status: Status) {
     return this.call<void>("setStatus", id, status);
+  }
+  setDue(id: string, dueMs: number | null) {
+    return this.call<void>("setDue", id, dueMs ?? undefined);
   }
   toggleDone(id: string) {
     return this.call<void>("toggleDone", id);

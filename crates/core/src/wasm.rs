@@ -380,6 +380,17 @@ impl DaybookEngine {
     /// The EOD report. `options` is a [`crate::report::ReportOptions`] as a plain
     /// JS object — the host owns the timezone, so it supplies the day window and
     /// the UTC offset rather than core guessing either.
+    /// `due_ms` is `undefined`/`null` to clear. Milliseconds cross as `f64`
+    /// because that is what a JS number is; the values involved are far inside
+    /// the 2^53 range where that is exact.
+    #[wasm_bindgen(js_name = setDue)]
+    pub fn set_due(&self, id: String, due_ms: Option<f64>) -> std::result::Result<(), JsValue> {
+        self.inner
+            .borrow()
+            .set_due(&id, due_ms.map(|d| d as i64))
+            .map_err(err)
+    }
+
     #[wasm_bindgen(js_name = generateReport)]
     pub fn generate_report(&self, options: JsValue) -> std::result::Result<JsValue, JsValue> {
         let options: ReportOptions = serde_wasm_bindgen::from_value(options)
