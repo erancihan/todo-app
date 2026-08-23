@@ -7,6 +7,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="color-scheme" content="dark light" />
     <title>Daybook</title>
+    <meta
+      name="description"
+      content="Offline-first, keyboard-driven todos that write your end-of-day report for you."
+    />
+    <!-- Installable PWA. The Tauri shell ignores all of this — it loads the same
+         bundle from disk over a custom protocol. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <meta name="theme-color" content="#1B1D21" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <link rel="stylesheet" href="/src/app.css" />
   </head>
   <body class="min-h-screen">

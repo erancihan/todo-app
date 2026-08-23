@@ -700,6 +700,22 @@ Alpine.data("daybook", (): AppComponent => {
   };
 });
 
+/**
+ * Register the service worker — browser host, production build only.
+ *
+ * Not in dev, where it would serve a stale bundle over the top of HMR and make
+ * every change look like it did nothing. Not in Tauri, which loads the bundle
+ * from disk over its own protocol and has no cold start to rescue.
+ */
+if (!isTauri() && import.meta.env.PROD && "serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    void navigator.serviceWorker.register("/sw.js").catch(() => {
+      // An unavailable service worker costs offline *cold start* and nothing
+      // else — the data is in OPFS either way — so it is not worth an error.
+    });
+  });
+}
+
 Alpine.store("host", { tauri: isTauri() });
 
 declare global {
