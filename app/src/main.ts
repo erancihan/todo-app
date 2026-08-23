@@ -26,6 +26,13 @@ import {
 } from "./core/list-controller";
 import { CHEAT_SHEET, PALETTE_COMMANDS } from "./core/commands";
 import { dismissToast, subscribeToasts, toast, type ToastMessage } from "./core/toast";
+import {
+  initAppearance,
+  setDensity,
+  setTheme,
+  type Density,
+  type Theme,
+} from "./core/appearance";
 
 type SidebarRow = ListController["sidebarRows"][number];
 
@@ -50,6 +57,13 @@ const GROUPINGS: Array<{ value: Grouping; label: string }> = [
   { value: "collection", label: "Collection" },
   { value: "tag", label: "Tag" },
   { value: "flat", label: "Flat" },
+];
+
+/** The three theme choices. `system` is a real option, not a fallback. */
+const THEMES: Array<{ value: Theme; label: string; icon: string }> = [
+  { value: "light", label: "Light", icon: "☀" },
+  { value: "dark", label: "Dark", icon: "☾" },
+  { value: "system", label: "System", icon: "◐" },
 ];
 
 /** Where the sidebar's collapsed state is remembered between sessions. */
@@ -152,6 +166,12 @@ interface AppComponent {
   detailTagDraft: string;
   submitDetailTag(): void;
   dropDetailTag(tagId: string): void;
+  // -- appearance
+  theme: Theme;
+  density: Density;
+  chooseTheme(theme: Theme): void;
+  toggleDensity(): void;
+  THEMES: typeof THEMES;
   detailDueValue(): string;
   setDetailDue(day: string): void;
 }
@@ -270,6 +290,8 @@ Alpine.data("daybook", (): AppComponent => {
     detailParent: null,
     detailTagDraft: "",
     toastMessage: null,
+    theme: "dark",
+    density: "dense",
     sidebarRows: [],
     newCollectionOpen: false,
     newCollectionDraft: "",
@@ -317,6 +339,10 @@ Alpine.data("daybook", (): AppComponent => {
       } catch {
         // Private windows and blocked site data throw on access, not on read.
       }
+
+      const appearance = initAppearance();
+      this.theme = appearance.theme;
+      this.density = appearance.density;
 
       subscribeToasts((message) => (this.toastMessage = message));
 
@@ -518,6 +544,15 @@ Alpine.data("daybook", (): AppComponent => {
       controller.closeOverlays();
     },
     dismissToast,
+    THEMES,
+    chooseTheme(theme) {
+      this.theme = theme;
+      setTheme(theme);
+    },
+    toggleDensity() {
+      this.density = this.density === "dense" ? "comfortable" : "dense";
+      setDensity(this.density);
+    },
 
     // -- detail view ---------------------------------------------------------
 

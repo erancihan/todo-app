@@ -96,15 +96,46 @@ body {
 }
 
 /* Dense desktop rows: 28–32px (docs §7.3). Mobile flips to comfortable. */
-.row-dense {
-  min-height: 30px;
-  padding: 6px 10px;
+/* Row metrics come from variables so the DensityToggle can swap them at the
+   root without every rule knowing about density (docs/04 §7.7). */
+:root {
+  --row-min-height: 30px;
+  --row-padding-y: 6px;
+  --row-padding-x: 10px;
 }
 
+/* Comfortable: the same rhythm touch already gets, offered to anyone who wants
+   it on a pointer device too. */
+:root[data-density="comfortable"] {
+  --row-min-height: 40px;
+  --row-padding-y: 10px;
+  --row-padding-x: 12px;
+}
+
+.row-dense {
+  min-height: var(--row-min-height);
+  padding: var(--row-padding-y) var(--row-padding-x);
+}
+
+/* Touch gets a 44px target regardless — an explicit "dense" preference is about
+   a mouse, and shrinking a finger target below the platform minimum on the
+   strength of it would be reading the preference too literally. */
 @media (pointer: coarse) {
   .row-dense {
-    min-height: 44px; /* 44px touch target */
+    min-height: 44px;
     padding: 10px 12px;
+  }
+}
+
+/* Nothing animates for anyone who asked the OS not to animate things. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
 

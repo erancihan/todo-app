@@ -115,9 +115,49 @@
 
       <main class="min-w-0 flex-1 px-6 py-8">
         <div class="mx-auto max-w-3xl">
-          <header class="mb-5 flex items-baseline justify-between">
+          <header class="mb-5 flex items-center justify-between gap-3">
             <h1 class="text-[1.375rem] font-[590] tracking-[-0.02em]">Daybook</h1>
-            <span class="font-mono text-[0.6875rem] text-muted-foreground" x-text="runtime"></span>
+
+            <div class="flex items-center gap-2">
+              <!-- DensityToggle. Touch always gets a 44px target regardless;
+                   this is about how tight the list is with a mouse. -->
+              <button
+                type="button"
+                class="rounded-[var(--radius-sm)] border px-1.5 py-0.5 font-mono text-[0.625rem] text-muted-foreground hover:text-foreground"
+                style="border-color: var(--border)"
+                :aria-label="`Density: ${density}. Switch.`"
+                :title="`Density: ${density}`"
+                @click="toggleDensity()"
+                x-text="density === 'dense' ? '≡' : '☰'"
+              ></button>
+
+              <!-- ThemeToggle. `system` is a real choice, not a fallback. -->
+              <div
+                class="flex items-center gap-px rounded-[var(--radius-sm)] border p-px"
+                style="border-color: var(--border)"
+                role="radiogroup"
+                aria-label="Theme"
+              >
+                <template x-for="t in THEMES" :key="t.value">
+                  <button
+                    type="button"
+                    role="radio"
+                    class="rounded-[var(--radius-sm)] px-1.5 py-0.5 text-[0.6875rem]"
+                    :class="theme === t.value ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground'"
+                    :aria-checked="theme === t.value"
+                    :aria-label="t.label"
+                    :title="t.label"
+                    @click="chooseTheme(t.value)"
+                    x-text="t.icon"
+                  ></button>
+                </template>
+              </div>
+
+              <span
+                class="font-mono text-[0.6875rem] text-muted-foreground"
+                x-text="runtime"
+              ></span>
+            </div>
           </header>
 
           <!-- Errors surface here rather than being swallowed into the console. -->
