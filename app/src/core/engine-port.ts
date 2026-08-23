@@ -15,6 +15,17 @@
  * it must never reach into Alpine.
  */
 
+import {
+  channel,
+  elect,
+  tabId,
+  type Call,
+  type Changed,
+  type Message,
+  type Reply,
+  type Role,
+} from "./tab-lease";
+
 export type Kind = "task" | "checklist_item";
 export type Status = "inbox" | "todo" | "in_progress" | "blocked" | "done" | "dropped";
 
@@ -156,6 +167,16 @@ export interface EnginePort {
 
   generateReport(options: ReportOptions): Promise<Report>;
   commitCarryOver(nodeIds: string[], dayKey: string): Promise<number>;
+
+  /**
+   * Fired when *another* context changed the data.
+   *
+   * Only the browser port implements it, and only because OPFS forces one engine
+   * per origin: the other tabs are calling through this one, so they have to be
+   * told when to re-read. The Tauri shell is a single process with a single
+   * engine and has nothing to announce.
+   */
+  onExternalChange?(listener: () => void): void;
 }
 
 /**
@@ -263,23 +284,81 @@ class TauriEnginePort implements EnginePort {
 }
 
 /**
+ * Reads. Everything else is treated as a write, which is the safe direction to be
+ * wrong in: a needless refresh costs a query, a missed one shows stale data.
+ */
+const READ_ONLY = new Set([
+  "runtime",
+  "listTree",
+  "node",
+  "listTags",
+  "listCollections",
+  "eventsBetween",
+  "eventsForNode",
+  "generateReport",
+]);
+
+/** How long a follower waits for the leader before giving up on a call. */
+const LEADER_TIMEOUT_MS = 10_000;
+
+/**
  * Browser half: the same `daybook-core`, compiled to wasm32, running in a Worker
  * over sqlite-wasm + OPFS.
  *
  * The Worker is required rather than preferred — see `db-worker.ts`. Calls are
  * RPC'd across and matched by id, so several can be in flight at once.
+ *
+ * ## One engine, many tabs
+ *
+ * OPFS grants its database lock to a single context per origin, so only one tab
+ * can own a worker. This port elects a leader (see `tab-lease.ts`); the leader
+ * runs the worker, and followers send the same RPC over a `BroadcastChannel` for
+ * the leader to execute. From the controller's side there is no difference — the
+ * port is still just an object with async methods.
  */
 class WasmEnginePort implements EnginePort {
-  private worker: Worker;
+  private worker: Worker | null = null;
   private nextId = 1;
   private pending = new Map<
     number,
     { resolve: (v: unknown) => void; reject: (e: Error) => void }
   >();
 
+  private readonly tab = tabId();
+  private readonly bus = channel();
+  private role: Role | null = null;
+  /** Resolves once the election has decided what this tab is. */
+  private ready: Promise<void>;
+  private markReady!: () => void;
+  private changeListeners = new Set<() => void>();
+
   constructor() {
-    this.worker = new Worker(new URL("./db-worker.ts", import.meta.url), { type: "module" });
-    this.worker.addEventListener("message", (ev: MessageEvent) => {
+    this.ready = new Promise((resolve) => (this.markReady = resolve));
+    this.bus.addEventListener("message", (ev: MessageEvent<Message>) => this.onBus(ev.data));
+    elect(
+      () => this.becomeLeader(),
+      () => this.becomeFollower(),
+    );
+  }
+
+  private becomeLeader() {
+    const promoted = this.role === "follower";
+    this.role = "leader";
+    if (!this.worker) this.startWorker();
+    this.markReady();
+    // A promoted tab was reading through the tab that just died, so whatever it
+    // is showing may already be behind.
+    if (promoted) this.notifyChanged();
+  }
+
+  private becomeFollower() {
+    this.role = "follower";
+    this.markReady();
+  }
+
+  private startWorker() {
+    const worker = new Worker(new URL("./db-worker.ts", import.meta.url), { type: "module" });
+    worker.addEventListener("message", (ev: MessageEvent) => {
       const { id, ok, result, error } = ev.data;
       const entry = this.pending.get(id);
       if (!entry) return;
@@ -287,21 +366,112 @@ class WasmEnginePort implements EnginePort {
       if (ok) entry.resolve(result);
       else entry.reject(new Error(error));
     });
-    this.worker.addEventListener("error", (ev) => {
+    worker.addEventListener("error", (ev) => {
       // A worker-level failure strands every in-flight call; fail them all rather
       // than leaving the UI waiting on promises that can never settle.
       const err = new Error(`engine worker failed: ${ev.message}`);
       for (const [, entry] of this.pending) entry.reject(err);
       this.pending.clear();
     });
+    this.worker = worker;
   }
 
-  private call<T>(method: string, ...args: unknown[]): Promise<T> {
+  /** Register for "another tab changed the data" notifications. */
+  onExternalChange(listener: () => void): void {
+    this.changeListeners.add(listener);
+  }
+
+  private notifyChanged() {
+    for (const listener of this.changeListeners) listener();
+  }
+
+  private onBus(message: Message) {
+    if (message.kind === "changed") {
+      if (message.tab !== this.tab) this.notifyChanged();
+      return;
+    }
+
+    if (message.kind === "call") {
+      // Only the leader answers, and only if it still has a worker.
+      if (this.role !== "leader") return;
+      void this.callWorker(message.method, message.args).then(
+        (result) =>
+          this.bus.postMessage({
+            kind: "reply",
+            tab: message.tab,
+            id: message.id,
+            ok: true,
+            result,
+          } satisfies Reply),
+        (error: Error) =>
+          this.bus.postMessage({
+            kind: "reply",
+            tab: message.tab,
+            id: message.id,
+            ok: false,
+            error: error.message,
+          } satisfies Reply),
+      );
+      return;
+    }
+
+    if (message.kind === "reply" && message.tab === this.tab) {
+      const entry = this.remote.get(message.id);
+      if (!entry) return;
+      this.remote.delete(message.id);
+      clearTimeout(entry.timer);
+      if (message.ok) entry.resolve(message.result);
+      else entry.reject(new Error(message.error ?? "engine call failed"));
+    }
+  }
+
+  private remote = new Map<
+    number,
+    {
+      resolve: (v: unknown) => void;
+      reject: (e: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+
+  private callWorker<T>(method: string, args: unknown[]): Promise<T> {
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
-      this.worker.postMessage({ id, method, args });
+      this.worker?.postMessage({ id, method, args });
     });
+  }
+
+  private callLeader<T>(method: string, args: unknown[]): Promise<T> {
+    const id = this.nextId++;
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.remote.delete(id);
+        reject(
+          new Error(
+            "the tab holding the database stopped responding — reload this tab to take it over",
+          ),
+        );
+      }, LEADER_TIMEOUT_MS);
+      this.remote.set(id, { resolve: resolve as (v: unknown) => void, reject, timer });
+      this.bus.postMessage({ kind: "call", tab: this.tab, id, method, args } satisfies Call);
+    });
+  }
+
+  private async call<T>(method: string, ...args: unknown[]): Promise<T> {
+    await this.ready;
+    const result =
+      this.role === "leader"
+        ? await this.callWorker<T>(method, args)
+        : await this.callLeader<T>(method, args);
+
+    // Tell the other tabs to re-read. Broadcast from whichever tab issued the
+    // call, not from the leader, so a follower's own write does not come back to
+    // it as an external change and trigger a second refresh.
+    if (!READ_ONLY.has(method)) {
+      this.bus.postMessage({ kind: "changed", tab: this.tab } satisfies Changed);
+    }
+    return result;
   }
 
   runtime() {

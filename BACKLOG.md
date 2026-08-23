@@ -16,6 +16,7 @@ Sibling docs: [README](README.md) · [01 — Product Requirements](docs/01-produ
 | **Phase 1** — MVP core | **Done** on browser + Linux desktop. Capture loop, single NODE table, event log, ordering, promotion, tags, collections, search, undo/redo, live preview. |
 | **Phase 2** — sync + images | **Not started.** The relay crate exists as a skeleton and serves nothing. |
 | **Phase 3** — EOD report + polish | **Mostly done.** Report engine, report view, detail view, sidebar, density/theme, reduced-motion, copy-as-markdown all ship. Inline thumbnails wait on Phase 2. |
+| **Multi-tab browser** | **Done.** One tab holds the OPFS database and the others call it through a Web Lock + `BroadcastChannel`; the leader's tab closing promotes a waiter automatically. |
 | **Phase 4** — mobile hardening + v1 | **Not started.** |
 
 ---
@@ -49,11 +50,6 @@ The groundwork is deliberately in place: [`crates/core/src/op.rs`](crates/core/s
 Content-addressed SHA-256 blobs on a separate sync channel, with blurhash degradation while bytes are in flight. Tied to Phase 2 by design — an attachment that cannot sync is a local file with extra steps.
 
 **First step:** the local half. Paste-to-attach in CodeMirror, blob write, `![](attachment:<hash>)` in the body, and a decoration widget in [`live-preview.ts`](app/src/core/live-preview.ts). That is useful on its own and does not need the relay.
-
-### Multi-tab OPFS
-**Known limitation, currently unhandled beyond a clear error.** The OPFS SAH-pool VFS takes an exclusive lock per origin, so the second browser tab cannot open the database. [`db-worker.ts`](app/src/core/db-worker.ts) detects this and says so in plain language rather than failing cryptically, which is the floor, not a fix.
-
-**First step:** elect a leader tab via the Web Locks API and proxy the other tabs' engine calls to it over a `BroadcastChannel`. The `EnginePort` seam is already the right shape for this — a third implementation alongside `TauriEnginePort` and `WasmEnginePort`.
 
 ### Account and host switcher
 [`docs/04` §8](docs/04-ux-and-interaction.md) puts a workspace-switcher above the collections sidebar, toggling an "All accounts" aggregate against a per-host view. It is deliberately absent: it is a surface for a feature that does not exist yet. There is exactly one local account until sync lands, and a switcher with one entry is chrome that teaches nothing.

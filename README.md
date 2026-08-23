@@ -52,6 +52,7 @@ _Created 2 · Updated 0 · Completed 2 · Carried over 0_
 │   │                    live-preview.ts    Obsidian-style inline rendering
 │   │                    token-complete.ts  #tag / @collection autocomplete
 │   │                    db-worker.ts       sqlite-wasm + OPFS driver
+│   │                    tab-lease.ts       one engine per origin, many tabs
 │   ├── src/main.ts    Alpine boot — the view layer, and only the view layer
 │   ├── public/        PWA manifest, icons, and the offline service worker
 │   └── src-tauri/     the Tauri v2 shell (desktop + mobile entry points)

@@ -414,6 +414,11 @@ Alpine.data("daybook", (): AppComponent => {
         controller.handleKey(event);
       });
 
+      // Another tab wrote through this one (or this tab was just promoted after
+      // the leader closed): re-read rather than showing what was true a moment
+      // ago in a different window.
+      port.onExternalChange?.(() => void controller.refresh());
+
       void port.runtime().then((r) => (this.runtime = r));
       void controller.refresh().then(() => {
         // Empty list on first run: open a capture line immediately rather than

@@ -340,6 +340,49 @@ try {
   const bodyText = await page.locator("body").textContent();
   check("the captured todo is still there", bodyText.includes("Ship EOD report v1"));
 
+  // --- a second tab -------------------------------------------------------
+  // OPFS grants its database lock to one context per origin, so this used to
+  // fail to boot outright. The second tab now finds the first through a Web
+  // Lock and calls it instead of opening its own database.
+  const second = await context.newPage();
+  const secondErrors = [];
+  second.on("pageerror", (e) => secondErrors.push(e.message));
+  second.on("console", (m) => m.type() === "error" && secondErrors.push(m.text()));
+  await second.goto(BASE, { waitUntil: "load" });
+  await second.locator("li[role=treeitem]").first().waitFor({ timeout: 60_000 });
+  await second.waitForTimeout(1500);
+
+  const secondRows = await second.locator("li[role=treeitem]").count();
+  check("a second tab opens and sees the same data", secondRows > 0, `${secondRows} rows`);
+  check(
+    "the second tab reports no engine error",
+    secondErrors.filter((e) => !e.includes("favicon")).length === 0,
+    secondErrors.slice(0, 2).join(" | "),
+  );
+
+  // A write from the follower has to reach the leader's database, and the leader
+  // has to notice without being touched.
+  const beforeCrossTab = await page.locator("li[role=treeitem]").count();
+  await second.keyboard.press("Escape");
+  await second.waitForTimeout(300);
+  await second.keyboard.press("n");
+  await second.waitForTimeout(700);
+  await second.locator(".cm-content").first().click();
+  await second.keyboard.type("Written in the second tab");
+  await second.keyboard.press("Control+Enter");
+  await second.waitForTimeout(700);
+  await second.keyboard.press("Escape");
+  await second.waitForTimeout(1800);
+
+  const afterCrossTab = await page.locator("li[role=treeitem]").count();
+  check(
+    "a write in one tab shows up in the other",
+    afterCrossTab === beforeCrossTab + 1,
+    `${beforeCrossTab} → ${afterCrossTab}`,
+  );
+  await second.close();
+  await page.waitForTimeout(500);
+
   // Errors from the worker or Rust would land here.
   const realErrors = errors.filter((e) => !e.includes("favicon"));
   check("no console errors", realErrors.length === 0, realErrors.slice(0, 3).join("\n        "));
