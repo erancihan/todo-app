@@ -19,6 +19,7 @@ Sibling docs: [README](README.md) · [01 — Product Requirements](docs/01-produ
 | **Multi-tab browser** | **Done.** One tab holds the OPFS database and the others call it through a Web Lock + `BroadcastChannel`; the leader's tab closing promotes a waiter automatically. |
 | **Drag-to-reorder** | **Done** for pointer input; touch still needs a long-press path. |
 | **Attachments** | **Local half done** — paste/drop, SHA-256 content addressing, inline rendering. The sync channel is Phase 2. |
+| **The personal-todo redirection** | **Done**, all five phases (see below). Statuses as data, the time model and rail, `!` capture tokens, repeating todos, link chips. |
 | **Phase 4** — mobile hardening + v1 | **Not started.** |
 
 ---
@@ -98,12 +99,25 @@ An alternate view over the same tree, listed as a later alternate in [`docs/04` 
 
 ---
 
+## The personal-todo redirection
+
+The docs' examples and vocabulary drifted toward a bug tracker; the owner redirected the build toward a personal todo tool — at most *pointing at* trackers, never becoming one. Five phases, all shipped, all beyond what the docs specify and recorded here so the docs can catch up deliberately:
+
+1. **De-tracker pass + link chips** — everyday example data throughout, and ticket URLs (`github.com/o/r/issues/12`, GitLab, Jira, Linear, Notion) render as short reference chips ([`link-chips.ts`](app/src/core/link-chips.ts)) that open externally. The chip is the boundary: the reference lives *there*, the task lives here.
+2. **User-defined statuses** — the status vocabulary is data (`status` table), each row carrying an open/done/cancelled *category* that is the only semantic the engine reads. Built-ins seed under the old enum ids, so existing data needed no migration. Both "Waiting" and "Blocked" ship; deleting either is a user decision.
+3. **The time model** — `scheduled_for` is a civil plan day ("when I'll do it"), distinct from `due_at` ("when it must be finished by"); the sidebar leads with Today / Upcoming / Anytime / All / Logbook, and `s` opens the schedule popover.
+4. **`!` date tokens** — `!tomorrow`, `!friday`, `!aug 30`, `!in 3 days` in any body editor, same strip-and-apply contract as `#`/`@`, over a bounded hand-rolled grammar ([`date-token.ts`](app/src/core/date-token.ts)) that resolves to exactly one day or refuses.
+5. **Repeating todos** — `!every monday` / the detail rail's Repeats field, over the same kind of bounded grammar ([`repeat.rs`](crates/core/src/repeat.rs)). A rule is a fixed schedule anchored on the plan day; completing an occurrence spawns the next in the same engine transaction, the rule moves to the spawn, and the report ignores the spawn's `created` event so a daily chore does not read as new work every day.
+
+---
+
 ## Known deviations from the docs
 
 Recorded here so they are decisions rather than drift. Each is also commented where it lives.
 
 | Deviation | Where | Why |
 | --- | --- | --- |
+| Statuses are user-defined rows, not the fixed enum | [`engine.rs`](crates/core/src/engine.rs) | [`docs/03` §3](docs/03-data-model.md) fixes `status` as an enum. The redirection made the vocabulary data; the open/done/cancelled *category* carries the semantics, so renaming "Done" cannot change what finishing means. Built-ins seed under the old enum ids — zero migration. |
 | `order_key` jitter separator is `-`, not `:` | [`order_key.rs`](crates/core/src/order_key.rs) | ASCII `:` (58) sorts **above** the digits, so `"V:dev" > "V7:dev"` and the ordering breaks. `-` (45) sorts below the whole base62 alphabet. Covered by an exhaustive alphabet test. |
 | `v` opens the detail view, not `Enter` | [`keymap.ts`](app/src/core/keymap.ts) | [`docs/04` §6](docs/04-ux-and-interaction.md) has `Enter` open the detail view for a *promoted* sub-item. That makes one key mean "edit here" on one row and "navigate away" on the next, decided by a flag the user cannot see. `v` works on any node; the promoted `↑` marker is the mouse affordance. |
 | The detail body is a live editor, not a rendered preview | [`index.html`](app/index.html) | [`docs/04` §8](docs/04-ux-and-interaction.md) says "the rendered markdown body". Live preview already renders markdown inline, so a separate renderer would be a second markdown implementation to keep in agreement with the first — and it would put a mode switch between the reader and their own words. |

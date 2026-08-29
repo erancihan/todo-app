@@ -8,6 +8,7 @@
 - **Phase 1 (MVP core)** — **done** on **the browser and the Linux desktop**: the capture loop, single-table NODE model, event log, ordering, promotion, tags, collections, search, undo/redo, and Obsidian-style inline live preview. Windows, macOS, iOS, and Android are untested here and are the owner's next targets.
 - **Phase 2 (sync + images)** — **not started.** The relay crate is a skeleton.
 - **Phase 3 (EOD report + polish)** — the deterministic report engine, the report view, the GitHub-issue detail view, the collections sidebar, due dates, `#tag`/`@collection` autocomplete, density and theme toggles, and an installable offline PWA all ship. Inline attachment thumbnails wait on Phase 2.
+- **Beyond the roadmap — the personal-todo redirection** (recorded in [`BACKLOG.md`](BACKLOG.md)): user-defined statuses with open/done/cancelled categories; the time model — a `scheduled_for` plan day distinct from the due instant, with a Today / Upcoming / Anytime / All / Logbook rail and an `s` schedule popover; natural-language `!tomorrow` / `!aug 30` capture tokens; repeating todos (`!every monday`) that spawn their next occurrence on completion; and ticket URLs rendered as short reference chips — Daybook points at trackers rather than becoming one.
 
 The report is derived from the immutable event log and is byte-identical on both hosts:
 
@@ -37,6 +38,7 @@ _Created 2 · Updated 0 · Completed 2 · Carried over 0_
 │   │                      hosts run this exact code.
 │   │   src/report.rs    ← the EOD report: log → buckets → grouped markdown.
 │   │                      Timezone-free by design; the host supplies the window.
+│   │   src/repeat.rs    ← the bounded repeat grammar + civil-date arithmetic
 │   │   src/store.rs     ← the only place the two builds differ (see below)
 │   │   src/body.rs      ← BodyCrdt trait + yrs Y.Text
 │   │   src/wasm.rs      ← wasm32-only bindgen surface for the PWA
@@ -50,7 +52,9 @@ _Created 2 · Updated 0 · Completed 2 · Carried over 0_
 │   │                    keymap.ts          the authoritative bindings
 │   │                    body-editor.ts     CodeMirror 6
 │   │                    live-preview.ts    Obsidian-style inline rendering
-│   │                    token-complete.ts  #tag / @collection autocomplete
+│   │                    token-complete.ts  #tag / @collection / !date autocomplete
+│   │                    date-token.ts      the ! grammar: days and repeat rules
+│   │                    link-chips.ts      ticket URLs as short reference chips
 │   │                    attachments.ts     paste/drop images
 │   │                    image-widget.ts    render attachment:<hash> inline
 │   │                    db-worker.ts       sqlite-wasm + OPFS driver
