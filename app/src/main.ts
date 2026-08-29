@@ -223,6 +223,10 @@ Alpine.data("daybook", (): AppComponent => {
       const id = target();
       if (id) void controller.addTag(id, name);
     },
+    applySchedule: (day) => {
+      const id = target();
+      if (id) void controller.setScheduledDay(id, day);
+    },
     applyCollection: (name) => {
       const id = target();
       if (!id) return;

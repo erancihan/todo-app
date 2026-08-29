@@ -22,6 +22,8 @@ import {
 import type { Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 
+import { DAY_SUGGESTIONS, parseDayToken } from "./date-token";
+
 export interface TokenSources {
   /** Existing tag names, for suggestions. */
   tags(): string[];
@@ -31,15 +33,21 @@ export interface TokenSources {
   applyTag(name: string): void;
   /** File that node into a collection, creating it if it is new. */
   applyCollection(name: string): void;
+  /** Schedule that node for a civil day (`YYYY-MM-DD`). */
+  applySchedule(day: string): void;
 }
 
 /**
  * Tags cannot contain whitespace; collection names can ("Client X"), so `@`
  * matches spaces too — but only up to two words, or every `@` would swallow the
  * rest of the line and the menu would never close.
+ *
+ * The date token allows up to three words ("august 30 2026") of word characters
+ * and hyphens ("2026-08-30") — everything the bounded grammar can produce.
  */
 const TAG_TOKEN = /#([\w-]*)$/;
 const COLLECTION_TOKEN = /@([\w-]*(?: [\w-]+)?)$/;
+const DATE_TOKEN = /!([\w-]*(?: [\w-]+){0,2})$/;
 
 function build(
   from: number,
@@ -82,6 +90,56 @@ function build(
   return { from, to, options, filter: false };
 }
 
+/**
+ * The `!` menu. Unlike `#`/`@` there is no list of existing values to draw on —
+ * the options are the grammar's own suggestions, each previewed with the day it
+ * resolves to, plus whatever the user typed when it parses. Nothing that fails
+ * to parse is offered, so the menu can never schedule a guess.
+ */
+function buildDates(
+  from: number,
+  to: number,
+  typed: string,
+  apply: (day: string) => void,
+): CompletionResult | null {
+  const now = new Date();
+  const query = typed.toLowerCase().trim();
+
+  const commit = (day: string) => (view: EditorView) => {
+    view.dispatch({ changes: { from, to, insert: "" } });
+    apply(day);
+  };
+
+  const options: Completion[] = [];
+  for (const name of DAY_SUGGESTIONS) {
+    if (query && !name.startsWith(query)) continue;
+    const parsed = parseDayToken(name, now);
+    if (!parsed) continue;
+    options.push({
+      label: `!${name}`,
+      detail: parsed.label,
+      type: "constant",
+      apply: commit(parsed.day),
+    });
+  }
+
+  // Direct input — "!aug 30", "!in 4 days" — that is not a suggestion prefix
+  // still parses; offer it first, previewed with the day it means.
+  if (query && !DAY_SUGGESTIONS.some((s) => s === query)) {
+    const parsed = parseDayToken(query, now);
+    if (parsed) {
+      options.unshift({
+        label: `!${query}`,
+        detail: parsed.label,
+        type: "constant",
+        apply: commit(parsed.day),
+      });
+    }
+  }
+
+  return options.length ? { from, to, options, filter: false } : null;
+}
+
 function source(sources: TokenSources) {
   return (context: CompletionContext): CompletionResult | null => {
     const tag = context.matchBefore(TAG_TOKEN);
@@ -110,6 +168,22 @@ function source(sources: TokenSources) {
         "collection",
         sources.applyCollection,
       );
+    }
+
+    const date = context.matchBefore(DATE_TOKEN);
+    if (date) {
+      // `!` is ordinary punctuation at the end of a word — "ship it!" must not
+      // pop a scheduling menu — so the token only counts at the start of one.
+      // The guard includes `!` itself, or "ship it!!" would match on the second.
+      if (date.from > 0) {
+        const before = context.state.sliceDoc(date.from - 1, date.from);
+        if (/[\w!]/.test(before)) return null;
+      }
+      const typed = date.text.slice(1);
+      // The regex admits a leading space so "!next week" works, but prose after
+      // a bang — "So close! tomorrow we ship" — is not a token.
+      if (typed.startsWith(" ")) return null;
+      return buildDates(date.from, date.to, typed, sources.applySchedule);
     }
 
     return null;

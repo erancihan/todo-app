@@ -86,6 +86,7 @@ export const CHEAT_SHEET: CheatSheetSection[] = [
       { keys: "Ctrl/Cmd+Enter", action: "Submit and open the next line" },
       { keys: "Ctrl/Cmd+B", action: "Bold" },
       { keys: "Ctrl/Cmd+I", action: "Italic" },
+      { keys: "#tag @collection !date", action: "Inline tokens — applied and stripped on accept (!tomorrow, !aug 30, !next week)" },
       { keys: "Esc", action: "Back to list (text is kept)" },
     ],
   },

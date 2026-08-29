@@ -465,6 +465,41 @@ try {
   );
   check("digit 4 returns to the All tree", backToAll === "all", backToAll);
 
+  // --- the ! date token ---------------------------------------------------
+  // Typing `!tomorrow` in the capture line must pop the completion menu; Enter
+  // accepts, which strips the token from the body and schedules the todo. This
+  // drives the whole chain: grammar → completion → applySchedule → engine.
+  await page.keyboard.press("n");
+  await page.waitForTimeout(700);
+  await page.locator(".cm-content").first().click();
+  await page.keyboard.type("Pay rent !tomorrow");
+  await page.locator(".cm-tooltip-autocomplete").waitFor({ timeout: 5_000 });
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(400);
+  await page.keyboard.press("Control+Enter");
+  await page.waitForTimeout(700);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(700);
+
+  const dateToken = await page.evaluate(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    const pad = (n) => String(n).padStart(2, "0");
+    const tomorrow = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const node = window.Alpine.$data(document.getElementById("app"))
+      .state.nodes.find((n) => n.title.startsWith("Pay rent"));
+    return node
+      ? { body: node.bodyMd, scheduledFor: node.scheduledFor, tomorrow }
+      : null;
+  });
+  check(
+    "!tomorrow schedules the todo and is stripped from the body",
+    Boolean(dateToken) &&
+      dateToken.scheduledFor === dateToken.tomorrow &&
+      !dateToken.body.includes("!tomorrow"),
+    JSON.stringify(dateToken),
+  );
+
   // --- user-defined statuses ----------------------------------------------
   // The vocabulary is data now. This drives the wasm boundary: create a custom
   // status, see it come back typed, apply it, and confirm `x` still finishes a
