@@ -43,6 +43,7 @@ export type Action =
   | "select-collection"
   | "open-detail"
   | "open-status-editor"
+  | "open-schedule"
   | "clear"
   // --- EDIT mode ---
   | "newline"
@@ -172,6 +173,8 @@ function resolveList(k: KeyInput): Action | null {
     // one key, one meaning, everywhere.
     case "v":
       return "open-detail";
+    case "s":
+      return "open-schedule";
     case "t":
       return "open-tags";
     case "c":

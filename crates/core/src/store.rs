@@ -197,6 +197,11 @@ CREATE TABLE IF NOT EXISTS node (
   created_at   INTEGER NOT NULL DEFAULT 0,
   updated_at   INTEGER NOT NULL DEFAULT 0,
   due_at       INTEGER,
+  -- The civil day ("YYYY-MM-DD") the user plans to DO this, as distinct from
+  -- due_at, the instant it must be finished by. A civil date, not a timestamp:
+  -- "do it Tuesday" names a calendar day wherever you wake up, and converting
+  -- through UTC would shift it overnight for half the planet.
+  scheduled_for TEXT,
   completed_at INTEGER,
   collapsed    INTEGER NOT NULL DEFAULT 0,
   deleted      INTEGER NOT NULL DEFAULT 0,

@@ -73,23 +73,38 @@
             </button>
           </div>
 
+          <!-- The standard rail: Today is the plan, the Logbook is the past,
+               collections are the map. Digits address every row top to bottom. -->
           <nav class="flex flex-col gap-px">
-            <template x-for="(row, i) in sidebarRows" :key="row.id ?? 'all'">
+            <template x-for="(row, i) in sidebarRows" :key="row.kind === 'view' ? row.view : row.id">
               <button
                 type="button"
                 class="flex h-7 items-center gap-2 rounded-[var(--radius-sm)] px-1.5 text-left text-[0.8125rem]"
-                :class="state.activeCollectionId === row.id
+                :class="`${isActiveRow(row)
                   ? 'bg-muted shadow-[inset_2px_0_0_var(--primary)]'
-                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'} ${
+                  row.kind === 'collection' && sidebarRows[i - 1]?.kind === 'view' ? 'mt-2' : ''}`"
                 :title="state.sidebarCollapsed ? `${row.name} — ${row.count}` : `Press ${i + 1}`"
-                :aria-current="state.activeCollectionId === row.id ? 'true' : 'false'"
-                @click="selectCollection(row.id)"
+                :aria-current="isActiveRow(row) ? 'true' : 'false'"
+                @click="selectSidebarRow(i)"
               >
-                <span
-                  class="size-[8px] shrink-0 rounded-full"
-                  :class="state.sidebarCollapsed ? 'mx-auto' : ''"
-                  :style="`background: ${collectionColor(row.color)}`"
-                ></span>
+                <!-- x-if, not x-show: the dot's `:style` binding rewrites the
+                     inline style attribute x-show hides with, so the two cannot
+                     share an element. -->
+                <template x-if="row.kind === 'collection'">
+                  <span
+                    class="size-[8px] shrink-0 rounded-full"
+                    :class="state.sidebarCollapsed ? 'mx-auto' : ''"
+                    :style="`background: ${collectionColor(row.color)}`"
+                  ></span>
+                </template>
+                <template x-if="row.kind === 'view'">
+                  <span
+                    class="w-[8px] shrink-0 text-center font-mono text-[0.625rem]"
+                    :class="state.sidebarCollapsed ? 'mx-auto' : ''"
+                    x-text="{ today: '☀', upcoming: '→', anytime: '∞', all: '≔', logbook: '✓' }[row.view]"
+                  ></span>
+                </template>
                 <span
                   x-show="!state.sidebarCollapsed"
                   class="truncate"
@@ -133,7 +148,15 @@
       <main class="min-w-0 flex-1 px-6 py-8">
         <div class="mx-auto max-w-3xl">
           <header class="mb-5 flex items-center justify-between gap-3">
-            <h1 class="text-[1.375rem] font-[590] tracking-[-0.02em]">Daybook</h1>
+            <h1 class="text-[1.375rem] font-[590] tracking-[-0.02em]">
+              Daybook
+              <span
+                x-show="!state.report && !state.detailId && (state.activeView !== 'all' || state.activeCollectionId)"
+                x-cloak
+                class="text-muted-foreground font-[510]"
+                x-text="`· ${activeViewName()}`"
+              ></span>
+            </h1>
 
             <div class="flex items-center gap-2">
               <!-- DensityToggle. Touch always gets a 44px target regardless;
@@ -171,6 +194,7 @@
               </div>
 
               <span
+                data-runtime
                 class="font-mono text-[0.6875rem] text-muted-foreground"
                 x-text="runtime"
               ></span>
@@ -368,13 +392,13 @@
                       <!-- Status dot for the states a checkbox cannot express.
                            `todo` and `done` are already the checkbox, so they get no
                            dot — otherwise every row carries redundant chrome. -->
-                      <span
-                        x-show="statusDot(node)"
-                        x-cloak
-                        class="size-[6px] shrink-0 rounded-full"
-                        :style="`background: ${statusDot(node)?.color}`"
-                        :title="statusDot(node)?.label"
-                      ></span>
+                      <template x-if="statusDot(node)">
+                        <span
+                          class="size-[6px] shrink-0 rounded-full"
+                          :style="`background: ${statusDot(node)?.color}`"
+                          :title="statusDot(node)?.label"
+                        ></span>
+                      </template>
 
                       <!-- `title` is derived from the body's first line by the engine,
                            with the markdown stripped — never rendered raw here. -->
@@ -484,11 +508,26 @@
             No sub-items. Press <kbd class="font-mono">a</kbd> to add one.
           </p>
           <p
-            x-show="rows().length === 0 && !state.detailId && !state.activeCollectionId"
+            x-show="rows().length === 0 && !state.detailId && !state.activeCollectionId && state.activeView === 'all'"
             x-cloak
             class="row-dense text-[0.8125rem] text-muted-foreground"
           >
             Nothing yet. Press <kbd class="font-mono">n</kbd> to capture something.
+          </p>
+          <p
+            x-show="rows().length === 0 && !state.detailId && !state.activeCollectionId && state.activeView === 'today'"
+            x-cloak
+            class="row-dense text-[0.8125rem] text-muted-foreground"
+          >
+            Nothing planned. Press <kbd class="font-mono">s</kbd> on a todo to schedule it,
+            or <kbd class="font-mono">n</kbd> to capture straight into today.
+          </p>
+          <p
+            x-show="rows().length === 0 && !state.detailId && !state.activeCollectionId && state.activeView !== 'all' && state.activeView !== 'today'"
+            x-cloak
+            class="row-dense text-[0.8125rem] text-muted-foreground"
+          >
+            Nothing here.
           </p>
           <p
             x-show="rows().length === 0 && !state.detailId && state.activeCollectionId"
@@ -526,6 +565,30 @@
                    and tags can be edited for *this* todo (`t` and `c` act on the
                    focused sub-item), so hiding it would strand them. -->
               <div class="flex flex-col gap-5 text-[0.75rem] lg:sticky lg:top-8">
+                <div>
+                  <h3 class="mb-1.5 text-[0.6875rem] font-[590] tracking-[0.06em] text-muted-foreground uppercase">
+                    Scheduled
+                  </h3>
+                  <!-- "When I'll do it", as distinct from Due, "when it must be
+                       finished by" — the separation this whole phase exists for. -->
+                  <input
+                    type="date"
+                    class="w-full rounded-[var(--radius-sm)] border bg-transparent px-1.5 py-1 outline-none"
+                    style="border-color: var(--border)"
+                    :value="detailScheduledValue()"
+                    @change="setDetailScheduled($event.target.value)"
+                  />
+                  <button
+                    type="button"
+                    x-show="detail?.scheduledFor"
+                    x-cloak
+                    class="mt-1 text-[0.6875rem] text-muted-foreground hover:text-foreground"
+                    @click="setDetailScheduled('')"
+                  >
+                    Clear
+                  </button>
+                </div>
+
                 <div>
                   <h3 class="mb-1.5 text-[0.6875rem] font-[590] tracking-[0.06em] text-muted-foreground uppercase">
                     Due
@@ -941,6 +1004,57 @@
             style="border-color: var(--border)"
             @keydown.enter.prevent="submitCollection()"
             @keydown.escape.prevent="closeOverlays(); collectionDraft = ''"
+          />
+        </div>
+      </div>
+
+      <!-- `s` schedule popover: one keystroke each for the four common answers
+           to "when?", plus a date field for everything else. -->
+      <div
+        x-show="state.schedulePopoverOpen"
+        x-cloak
+        class="fixed inset-0 z-50 flex items-start justify-center p-6 pt-[22vh]"
+        style="background: rgb(0 0 0 / 0.55)"
+        @click="closeOverlays()"
+      >
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Schedule"
+          class="w-full max-w-xs rounded-[var(--radius-lg)] border p-3"
+          style="border-color: var(--border); background: var(--popover)"
+          @click.stop
+        >
+          <h2 class="mb-2 text-[0.8125rem] font-[560]">
+            Schedule
+            <span class="text-muted-foreground" x-text="focused?.title || 'Untitled'"></span>
+          </h2>
+          <div class="flex flex-col gap-px text-[0.8125rem]">
+            <template
+              x-for="opt in [
+                { key: 't', label: 'Today', value: 'today' },
+                { key: 'm', label: 'Tomorrow', value: 'tomorrow' },
+                { key: 'w', label: 'Next week', value: 'next-week' },
+                { key: 'x', label: 'Clear', value: 'clear' },
+              ]"
+              :key="opt.key"
+            >
+              <button
+                type="button"
+                class="flex items-center justify-between rounded-[var(--radius-sm)] px-2 py-1 text-left hover:bg-muted"
+                @click="schedule(opt.value)"
+              >
+                <span x-text="opt.label"></span>
+                <kbd class="font-mono text-[0.6875rem] text-muted-foreground" x-text="opt.key"></kbd>
+              </button>
+            </template>
+          </div>
+          <input
+            type="date"
+            class="mt-2 w-full rounded-[var(--radius-sm)] border bg-transparent px-2 py-1 text-[0.8125rem] outline-none"
+            style="border-color: var(--border)"
+            aria-label="Pick a day"
+            @change="schedulePick($event.target.value)"
           />
         </div>
       </div>

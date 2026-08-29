@@ -25,6 +25,26 @@ import type {
 } from "./engine-port";
 import { fromEvent, resolveKey, shouldPreventDefault, type Action, type Mode } from "./keymap";
 
+/**
+ * The standard rail of a personal tracker (the Things-shaped consensus): Today
+ * is the plan, Upcoming is what has a date, Anytime is the open pool, All is
+ * Daybook's original full tree, and the Logbook is where finished work rests.
+ */
+export type View = "today" | "upcoming" | "anytime" | "all" | "logbook";
+
+export const VIEWS: Array<{ view: View; name: string }> = [
+  { view: "today", name: "Today" },
+  { view: "upcoming", name: "Upcoming" },
+  { view: "anytime", name: "Anytime" },
+  { view: "all", name: "All" },
+  { view: "logbook", name: "Logbook" },
+];
+
+/** One row of the sidebar — a view above the fold, or a collection below it. */
+export type SidebarEntry =
+  | { kind: "view"; view: View; name: string; color: string; count: number }
+  | { kind: "collection"; id: string; name: string; color: string; count: number };
+
 export interface ListState {
   mode: Mode;
   nodes: NodeView[];
@@ -67,6 +87,10 @@ export interface ListState {
   /** Which local day the open report covers, as `YYYY-MM-DD`. */
   reportDay: string;
   reportGrouping: Grouping;
+  /** Which rail view the list is showing. */
+  activeView: View;
+  /** Whether the `s` schedule popover is open. */
+  schedulePopoverOpen: boolean;
   /** Sidebar scope: `null` is "All", otherwise only that collection's items. */
   activeCollectionId: string | null;
   /** Whether the sidebar is down to its icon rail. */
@@ -132,6 +156,8 @@ export class ListController {
     report: null,
     reportDay: "",
     reportGrouping: "collection",
+    activeView: "all",
+    schedulePopoverOpen: false,
     activeCollectionId: null,
     sidebarCollapsed: false,
     pendingKey: null,
@@ -236,6 +262,7 @@ export class ListController {
     const key: unknown[] = [
       this.state.nodes,
       this.state.detailId,
+      this.state.activeView,
       this.state.activeCollectionId,
       this.state.query,
     ];
@@ -284,6 +311,7 @@ export class ListController {
     if (this.state.detailId) return this.applyCollapse(this.subtreeOf(this.state.detailId));
 
     let rows = this.applyCollapse(this.state.nodes);
+    rows = this.keepWithAncestors(rows, (n) => matchesView(n, this.state.activeView));
     if (this.state.activeCollectionId) rows = this.applyCollectionScope(rows);
     if (this.state.query.trim()) rows = this.applyFilter(rows);
     return rows;
@@ -503,11 +531,76 @@ export class ListController {
     await this.openReport(localDayKey(date));
   }
 
+  // -- scheduling ----------------------------------------------------------
+
+  private handleScheduleKey(key: string): boolean {
+    switch (key) {
+      case "t":
+        void this.scheduleFocused(localDayKey(new Date()));
+        return true;
+      case "m": {
+        const d = new Date();
+        d.setDate(d.getDate() + 1);
+        void this.scheduleFocused(localDayKey(d));
+        return true;
+      }
+      case "w":
+        void this.scheduleFocused(nextMondayKey());
+        return true;
+      case "x":
+        void this.scheduleFocused(null);
+        return true;
+      case "Escape":
+        this.patch({ schedulePopoverOpen: false });
+        return true;
+      default:
+        // Anything else is not a schedule key; swallow nothing so `j` after a
+        // mis-press does not vanish — but keep the popover up.
+        return false;
+    }
+  }
+
+  /**
+   * Set the focused node's plan day, undoably, and close the popover.
+   *
+   * The verbs land here from both the keyboard (`s` then a key) and the
+   * popover's buttons, so this is the one place the undo entry is written.
+   */
+  async scheduleFocused(day: string | null): Promise<void> {
+    const node = this.focused;
+    this.patch({ schedulePopoverOpen: false });
+    if (!node) return;
+    const previous = node.scheduledFor;
+    if (previous === day) return;
+
+    this.remember({
+      label: "schedule",
+      focusId: node.id,
+      undo: () => this.engine.setScheduled(node.id, previous),
+      redo: () => this.engine.setScheduled(node.id, day),
+    });
+    return this.run(() => this.engine.setScheduled(node.id, day));
+  }
+
+  /** The detail rail's date input — same engine call, no popover involved. */
+  async setScheduledDay(id: string, day: string | null): Promise<void> {
+    const node = this.state.nodes.find((n) => n.id === id);
+    if (!node || node.scheduledFor === day) return;
+    const previous = node.scheduledFor;
+    this.remember({
+      label: "schedule",
+      focusId: id,
+      undo: () => this.engine.setScheduled(id, previous),
+      redo: () => this.engine.setScheduled(id, day),
+    });
+    return this.run(() => this.engine.setScheduled(id, day));
+  }
+
   // -- sidebar -------------------------------------------------------------
 
   /** Scope the list to one collection, or to everything when given `null`. */
   setActiveCollection(id: string | null) {
-    this.patch({ activeCollectionId: id });
+    this.patch({ activeCollectionId: id, activeView: "all" });
     // Focus follows the scope: leaving it on a row that just went out of view
     // makes the next `j` jump somewhere unrelated.
     const rows = this.visible;
@@ -522,19 +615,55 @@ export class ListController {
 
   /**
    * The sidebar's rows, in the order the `1`…`9` shortcuts address them —
-   * "All" first, then the collections as the engine ordered them (by name).
+   * the rail views first, then the collections as the engine ordered them.
    */
-  get sidebarRows(): Array<{ id: string | null; name: string; color: string; count: number }> {
+  get sidebarRows(): SidebarEntry[] {
     const counts = this.openCounts;
+    const viewCount = (view: View) => {
+      // Counts say "work here", so only open items count — the Logbook and the
+      // finished-today courtesy rows would inflate them into noise.
+      if (view === "logbook") return 0;
+      return this.state.nodes.filter(
+        (n) => n.statusCategory === "open" && matchesView(n, view),
+      ).length;
+    };
     return [
-      { id: null, name: "All", color: "", count: counts.get(null) ?? 0 },
+      ...VIEWS.map((v) => ({
+        kind: "view" as const,
+        view: v.view,
+        name: v.name,
+        color: "",
+        count: viewCount(v.view),
+      })),
       ...this.state.allCollections.map((c) => ({
+        kind: "collection" as const,
         id: c.id,
         name: c.name,
         color: c.color,
         count: counts.get(c.id) ?? 0,
       })),
     ];
+  }
+
+  /** Select the nth sidebar row — view or collection alike. */
+  selectSidebarIndex(index: number) {
+    const row = this.sidebarRows[index];
+    if (!row) return;
+    if (row.kind === "view") this.setActiveView(row.view);
+    else this.setActiveCollection(row.id);
+  }
+
+  /**
+   * Switch the rail view. Mutually exclusive with a collection scope on
+   * purpose: "Today inside Work" is a filter combinatorics rabbit hole, and no
+   * app in this category offers it either.
+   */
+  setActiveView(view: View) {
+    this.patch({ activeView: view, activeCollectionId: null });
+    const rows = this.visible;
+    if (!rows.some((n) => n.id === this.state.focusedId)) {
+      this.patch({ focusedId: rows[0]?.id ?? null });
+    }
   }
 
   /** Run an engine call, refresh, and surface any failure instead of hiding it. */
@@ -643,6 +772,11 @@ export class ListController {
     const created = await this.engine.createNode(parentId, "", after);
     const scope = this.state.activeCollectionId;
     if (scope) await this.engine.addToCollection(created.id, scope);
+    // Capturing inside Today means "this is part of today's plan" — otherwise
+    // the new row would vanish from the very view it was typed into.
+    if (this.state.activeView === "today") {
+      await this.engine.setScheduled(created.id, localDayKey(new Date()));
+    }
     return created;
   }
 
@@ -727,6 +861,15 @@ export class ListController {
    * composition and the mobile soft keyboard.
    */
   handleKey(event: KeyboardEvent): boolean {
+    // The schedule popover is modal for exactly five keys. Handled here rather
+    // than in the keymap because these bindings exist only while it is open —
+    // `t` means "today" here and "tags" everywhere else.
+    if (this.state.schedulePopoverOpen) {
+      const handled = this.handleScheduleKey(event.key);
+      if (handled) event.preventDefault();
+      return handled;
+    }
+
     const resolution = resolveKey(fromEvent(event), this.state.mode, this.state.pendingKey);
 
     if (resolution.kind === "sequence-start") {
@@ -952,18 +1095,18 @@ export class ListController {
         return this.openReport();
       case "open-detail":
         return this.openDetail();
+      case "open-schedule":
+        if (!node) return;
+        return this.patch({ schedulePopoverOpen: true });
       case "open-status-editor":
         return this.openStatusEditor();
       case "toggle-sidebar":
         return this.setSidebarCollapsed(!this.state.sidebarCollapsed);
       case "select-collection": {
-        // `arg` is the digit that was pressed; 1 addresses the first row ("All").
-        const index = Number(arg) - 1;
-        const row = this.sidebarRows[index];
-        // Out of range is a no-op, not a reset to "All": pressing `7` with three
-        // collections should do nothing rather than silently widen the scope.
-        if (!row) return;
-        return this.setActiveCollection(row.id);
+        // `arg` is the digit that was pressed; 1 addresses the first row
+        // (Today). Out of range is a no-op, not a reset — pressing `9` with
+        // seven rows should do nothing rather than silently change the scope.
+        return this.selectSidebarIndex(Number(arg) - 1);
       }
 
       case "cheat-sheet":
@@ -979,7 +1122,8 @@ export class ListController {
           this.state.paletteOpen ||
           this.state.tagEditorOpen ||
           this.state.collectionPickerOpen ||
-          this.state.statusEditorOpen
+          this.state.statusEditorOpen ||
+          this.state.schedulePopoverOpen
         ) {
           return this.closeOverlays();
         }
@@ -1200,7 +1344,8 @@ export class ListController {
       this.state.paletteOpen ||
       this.state.tagEditorOpen ||
       this.state.collectionPickerOpen ||
-      this.state.statusEditorOpen;
+      this.state.statusEditorOpen ||
+      this.state.schedulePopoverOpen;
     if (wasOpen) this.host.closeEditor();
 
     this.patch({
@@ -1209,12 +1354,71 @@ export class ListController {
       tagEditorOpen: false,
       collectionPickerOpen: false,
       statusEditorOpen: false,
+      schedulePopoverOpen: false,
     });
   }
 
   /** The node the overlays act on. */
   get focusedNode(): NodeView | null {
     return this.focused;
+  }
+}
+
+/** The next Monday strictly after today — the "next week" everyone means. */
+export function nextMondayKey(): string {
+  const d = new Date();
+  const days = ((8 - d.getDay()) % 7) || 7;
+  d.setDate(d.getDate() + days);
+  return localDayKey(d);
+}
+
+/** Start of the local today, in ms. */
+function startOfTodayMs(): number {
+  return new Date(`${localDayKey(new Date())}T00:00:00`).getTime();
+}
+
+/**
+ * Whether a node belongs to a rail view.
+ *
+ * The rules are the Things-shaped consensus, stated once:
+ * - **Today**: open and either planned for today (or earlier — a slipped plan
+ *   day means "still meant to happen") or due before tomorrow. Finished-today
+ *   items stay too: a Today list that erases each win as it happens reads as a
+ *   treadmill, not a plan.
+ * - **Upcoming**: open with a plan day or due date in the future.
+ * - **Anytime**: open and dateless — the pool Today draws from.
+ * - **All**: the full tree, minus finished work older than today; that is the
+ *   Logbook's job.
+ * - **Logbook**: everything no longer open.
+ */
+export function matchesView(n: NodeView, view: View): boolean {
+  const todayKey = localDayKey(new Date());
+  const startToday = startOfTodayMs();
+  const endToday = startToday + 86_400_000;
+  const open = n.statusCategory === "open";
+  const finishedToday =
+    (n.completedAt !== null && n.completedAt >= startToday) ||
+    (n.statusCategory === "cancelled" && n.updatedAt >= startToday);
+
+  switch (view) {
+    case "today":
+      if (!open) return finishedToday;
+      return (
+        (n.scheduledFor !== null && n.scheduledFor <= todayKey) ||
+        (n.dueAt !== null && n.dueAt < endToday)
+      );
+    case "upcoming":
+      return (
+        open &&
+        ((n.scheduledFor !== null && n.scheduledFor > todayKey) ||
+          (n.dueAt !== null && n.dueAt >= endToday))
+      );
+    case "anytime":
+      return open && n.scheduledFor === null && n.dueAt === null;
+    case "logbook":
+      return !open;
+    case "all":
+      return open || finishedToday;
   }
 }
 

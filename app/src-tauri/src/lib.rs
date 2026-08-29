@@ -118,6 +118,20 @@ fn set_status(state: tauri::State<'_, AppState>, id: String, status: String) -> 
 }
 
 #[tauri::command]
+fn set_scheduled(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    day: Option<String>,
+) -> CmdResult<()> {
+    state
+        .engine
+        .lock()
+        .unwrap()
+        .set_scheduled(&id, day.as_deref())
+        .map_err(to_err)
+}
+
+#[tauri::command]
 fn set_tag_color(
     state: tauri::State<'_, AppState>,
     tag_id: String,
@@ -475,6 +489,7 @@ pub fn run() {
             set_status_color,
             delete_status,
             set_tag_color,
+            set_scheduled,
             toggle_done,
             promote,
             demote,

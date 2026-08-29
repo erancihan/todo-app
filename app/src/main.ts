@@ -26,6 +26,7 @@ import {
   ListController,
   localDayKey,
   type ListState,
+  type SidebarEntry,
 } from "./core/list-controller";
 import { CHEAT_SHEET, PALETTE_COMMANDS } from "./core/commands";
 import { dismissToast, subscribeToasts, toast, type ToastMessage } from "./core/toast";
@@ -37,7 +38,6 @@ import {
   type Theme,
 } from "./core/appearance";
 
-type SidebarRow = ListController["sidebarRows"][number];
 
 /**
  * The eight muted hue names the engine assigns, mapped to the same values
@@ -96,7 +96,15 @@ interface AppComponent {
   collectionDotColor(id: string): string;
   // -- sidebar
   /** Mirrored reactively for the same reason as `focused` — see below. */
-  sidebarRows: SidebarRow[];
+  sidebarRows: SidebarEntry[];
+  selectSidebarRow(index: number): void;
+  isActiveRow(row: SidebarEntry): boolean;
+  activeViewName(): string;
+  // -- scheduling
+  schedule(day: "today" | "tomorrow" | "next-week" | "clear"): void;
+  schedulePick(day: string): void;
+  detailScheduledValue(): string;
+  setDetailScheduled(day: string): void;
   /**
    * Lookups the row bindings need, mirrored so they are built once per change
    * rather than once per row. Scanning the node or collection list inside a
@@ -342,6 +350,8 @@ Alpine.data("daybook", (): AppComponent => {
       report: null,
       reportDay: "",
       reportGrouping: "collection",
+      activeView: "all",
+      schedulePopoverOpen: false,
       activeCollectionId: null,
       sidebarCollapsed: false,
       pendingKey: null,
@@ -564,6 +574,42 @@ Alpine.data("daybook", (): AppComponent => {
 
     selectCollection(id) {
       controller.setActiveCollection(id);
+    },
+    selectSidebarRow(index) {
+      controller.selectSidebarIndex(index);
+    },
+    isActiveRow(row) {
+      if (row.kind === "collection") return this.state.activeCollectionId === row.id;
+      return this.state.activeView === row.view && !this.state.activeCollectionId;
+    },
+    activeViewName() {
+      if (this.state.activeCollectionId) {
+        return this.collectionsById.get(this.state.activeCollectionId)?.name ?? "Collection";
+      }
+      return this.sidebarRows.find((r) => r.kind === "view" && r.view === this.state.activeView)
+        ?.name ?? "All";
+    },
+
+    // -- scheduling ----------------------------------------------------------
+
+    schedule(day) {
+      if (day === "clear") return void controller.scheduleFocused(null);
+      const d = new Date();
+      if (day === "tomorrow") d.setDate(d.getDate() + 1);
+      if (day === "next-week") {
+        const days = ((8 - d.getDay()) % 7) || 7;
+        d.setDate(d.getDate() + days);
+      }
+      void controller.scheduleFocused(localDayKey(d));
+    },
+    schedulePick(day) {
+      if (day) void controller.scheduleFocused(day);
+    },
+    detailScheduledValue() {
+      return this.detail?.scheduledFor ?? "";
+    },
+    setDetailScheduled(day) {
+      if (this.detail) void controller.setScheduledDay(this.detail.id, day || null);
     },
     toggleSidebar() {
       controller.setSidebarCollapsed(!this.state.sidebarCollapsed);

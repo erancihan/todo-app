@@ -66,6 +66,8 @@ export interface NodeView {
   createdAt: number;
   updatedAt: number;
   dueAt: number | null;
+  /** The civil day this is planned for, as `YYYY-MM-DD`, or null. */
+  scheduledFor: string | null;
   completedAt: number | null;
   collapsed: boolean;
   /** Depth in the tree, 0 for a root todo. Derived by the engine. */
@@ -186,6 +188,8 @@ export interface EnginePort {
   setTagColor(tagId: string, color: string): Promise<void>;
   /** `null` clears the due date. Milliseconds, UTC. */
   setDue(id: string, dueMs: number | null): Promise<void>;
+  /** `null` clears the plan day. A civil `YYYY-MM-DD`, resolved by the host. */
+  setScheduled(id: string, day: string | null): Promise<void>;
   toggleDone(id: string): Promise<void>;
   promote(id: string): Promise<void>;
   demote(id: string): Promise<void>;
@@ -284,6 +288,9 @@ class TauriEnginePort implements EnginePort {
   }
   setDue(id: string, dueMs: number | null) {
     return this.invoke<void>("set_due", { id, dueMs });
+  }
+  setScheduled(id: string, day: string | null) {
+    return this.invoke<void>("set_scheduled", { id, day });
   }
   toggleDone(id: string) {
     return this.invoke<void>("toggle_done", { id });
@@ -596,6 +603,9 @@ class WasmEnginePort implements EnginePort {
   }
   setDue(id: string, dueMs: number | null) {
     return this.call<void>("setDue", id, dueMs ?? undefined);
+  }
+  setScheduled(id: string, day: string | null) {
+    return this.call<void>("setScheduled", id, day ?? undefined);
   }
   toggleDone(id: string) {
     return this.call<void>("toggleDone", id);

@@ -231,6 +231,18 @@ impl DaybookEngine {
         self.inner.borrow().set_status(&id, &status).map_err(err)
     }
 
+    #[wasm_bindgen(js_name = setScheduled)]
+    pub fn set_scheduled(
+        &self,
+        id: String,
+        day: Option<String>,
+    ) -> std::result::Result<(), JsValue> {
+        self.inner
+            .borrow()
+            .set_scheduled(&id, day.as_deref())
+            .map_err(err)
+    }
+
     #[wasm_bindgen(js_name = setTagColor)]
     pub fn set_tag_color(&self, tag_id: String, color: String) -> std::result::Result<(), JsValue> {
         self.inner

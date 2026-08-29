@@ -51,6 +51,8 @@ pub struct NodeView {
     pub created_at: i64,
     pub updated_at: i64,
     pub due_at: Option<i64>,
+    /// The civil day this is planned for, as `YYYY-MM-DD`, or None.
+    pub scheduled_for: Option<String>,
     pub completed_at: Option<i64>,
     pub collapsed: bool,
     /// Depth in the tree, 0 for a root todo. Derived, not stored.
@@ -136,7 +138,7 @@ const HUES: [&str; 8] = [
 /// Columns every node query selects, in a fixed order. One constant so the
 /// `SELECT` and the row decoder can never drift apart.
 const NODE_COLUMNS: &str = "id, parent_id, kind, promoted, title, body_md, status, \
-     order_key, created_at, updated_at, due_at, completed_at, collapsed";
+     order_key, created_at, updated_at, due_at, completed_at, collapsed, scheduled_for";
 
 pub struct Engine<S: Store> {
     store: S,
@@ -155,8 +157,28 @@ impl<S: Store> Engine<S> {
             clock: RefCell::new(HlcClock::new(device.clone())),
             device,
         };
+        engine.migrate()?;
         engine.seed_statuses()?;
         Ok(engine)
+    }
+
+    /// Additive migrations for databases created before a column existed.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` never alters an existing table, so new
+    /// columns must be added here. Each ALTER is tried and its "duplicate
+    /// column" failure swallowed — SQLite has no `ADD COLUMN IF NOT EXISTS`,
+    /// and probing PRAGMA table_info first would just be a slower spelling of
+    /// the same idempotency.
+    fn migrate(&self) -> Result<()> {
+        for alter in ["ALTER TABLE node ADD COLUMN scheduled_for TEXT"] {
+            if let Err(e) = self.store.execute(alter, &[]) {
+                let text = e.to_string();
+                if !text.contains("duplicate column") {
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// First run for an account: install the default status set.
@@ -707,6 +729,44 @@ impl<S: Store> Engine<S> {
                 previous.map(|p| p.to_string()).as_deref(),
                 due_ms.map(|d| d.to_string()).as_deref(),
                 Some("due"),
+            )
+        })
+    }
+
+    /// Set or clear the day this is planned for.
+    ///
+    /// Takes a civil `YYYY-MM-DD`, already resolved by the host — the same
+    /// division of labour as the report window: only the host knows the
+    /// viewer's calendar.
+    pub fn set_scheduled(&self, id: &str, day: Option<&str>) -> Result<()> {
+        if let Some(d) = day {
+            let ok = d.len() == 10
+                && d.bytes().enumerate().all(|(i, b)| match i {
+                    4 | 7 => b == b'-',
+                    _ => b.is_ascii_digit(),
+                });
+            if !ok {
+                return Err(CoreError::Store(format!("not a YYYY-MM-DD day: {d}")));
+            }
+        }
+        let at = self.stamp();
+        let previous = self.node(id)?.and_then(|n| n.scheduled_for);
+        if previous.as_deref() == day {
+            return Ok(());
+        }
+        self.store.transaction(|| {
+            self.store.execute(
+                "UPDATE node SET scheduled_for = ? WHERE account_id = ? AND id = ?",
+                &[day.map(str::to_owned).into(), self.account(), id.into()],
+            )?;
+            self.touch(id, &at)?;
+            self.emit(
+                &at,
+                id,
+                EventType::Updated,
+                previous.as_deref(),
+                day,
+                Some("scheduled"),
             )
         })
     }
@@ -1658,6 +1718,7 @@ fn decode_node(
         due_at: row[10].as_i64(),
         completed_at: row[11].as_i64(),
         collapsed: row[12].as_bool(),
+        scheduled_for: row[13].as_str().map(str::to_owned),
         depth,
         has_children: false,
         tags: Vec::new(),
@@ -2139,6 +2200,67 @@ mod tests {
             e.list_tags().unwrap()[0].color,
             "lime",
             "recolor did not stick"
+        );
+    }
+
+    #[test]
+    fn a_scheduled_day_can_be_set_and_cleared() {
+        let e = engine();
+        let node = e.create_node(None, "Plant the bulbs", None).unwrap();
+        assert_eq!(node.scheduled_for, None);
+
+        e.set_scheduled(&node.id, Some("2026-09-01")).unwrap();
+        assert_eq!(
+            e.node(&node.id).unwrap().unwrap().scheduled_for.as_deref(),
+            Some("2026-09-01")
+        );
+
+        e.set_scheduled(&node.id, None).unwrap();
+        assert_eq!(e.node(&node.id).unwrap().unwrap().scheduled_for, None);
+    }
+
+    #[test]
+    fn a_malformed_day_is_refused() {
+        let e = engine();
+        let node = e.create_node(None, "task", None).unwrap();
+        for bad in ["tomorrow", "2026-9-1", "2026/09/01", "20260901", ""] {
+            assert!(
+                e.set_scheduled(&node.id, Some(bad)).is_err(),
+                "accepted {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rescheduling_the_same_day_writes_no_event() {
+        let e = engine();
+        let node = e.create_node(None, "task", None).unwrap();
+        e.set_scheduled(&node.id, Some("2026-09-01")).unwrap();
+        let before = e.events_for_node(&node.id).unwrap().len();
+        e.set_scheduled(&node.id, Some("2026-09-01")).unwrap();
+        assert_eq!(e.events_for_node(&node.id).unwrap().len(), before);
+    }
+
+    #[test]
+    fn the_migration_is_idempotent_across_reopen() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.init_schema().unwrap();
+        let e = Engine::open(store, "acct-test", DeviceId::from("device-test-0001")).unwrap();
+        let node = e.create_node(None, "task", None).unwrap();
+        e.set_scheduled(&node.id, Some("2026-09-01")).unwrap();
+
+        // Reopening runs migrate() again over a database that already has the
+        // column — the duplicate-column failure must be swallowed and the data
+        // must survive.
+        let e2 = Engine::open(
+            e.into_store(),
+            "acct-test",
+            DeviceId::from("device-test-0001"),
+        )
+        .unwrap();
+        assert_eq!(
+            e2.node(&node.id).unwrap().unwrap().scheduled_for.as_deref(),
+            Some("2026-09-01")
         );
     }
 

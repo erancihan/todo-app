@@ -95,7 +95,7 @@ try {
   await list.waitFor({ timeout: 60_000 });
 
   const runtime = await page
-    .locator("header span")
+    .locator("[data-runtime]")
     .textContent({ timeout: 30_000 })
     .catch(() => null);
   check("wasm engine reports its runtime", runtime === "wasm/browser", `got ${runtime}`);
@@ -433,6 +433,37 @@ try {
   await page.waitForTimeout(500);
   await page.keyboard.press("Escape");
   await page.waitForTimeout(900);
+
+  // --- the time model -----------------------------------------------------
+  // `s` then `t` plans the focused todo for today; digit 1 opens the Today
+  // view, which must contain exactly that todo. This drives the popover, the
+  // scheduled_for column (including its migration on an existing database),
+  // and the rail filtering in one pass.
+  await page.keyboard.press("s");
+  await page.waitForTimeout(400);
+  await page.keyboard.press("t");
+  await page.waitForTimeout(900);
+  await page.keyboard.press("1");
+  await page.waitForTimeout(700);
+  const todayView = await page.evaluate(() => {
+    const d = window.Alpine.$data(document.getElementById("app"));
+    return {
+      view: d.state.activeView,
+      rows: d.rows().length,
+      scheduled: d.rows().some((r) => r.scheduledFor !== null),
+    };
+  });
+  check(
+    "s→t plans a todo and the Today view shows it",
+    todayView.view === "today" && todayView.rows >= 1 && todayView.scheduled,
+    JSON.stringify(todayView),
+  );
+  await page.keyboard.press("4");
+  await page.waitForTimeout(700);
+  const backToAll = await page.evaluate(
+    () => window.Alpine.$data(document.getElementById("app")).state.activeView,
+  );
+  check("digit 4 returns to the All tree", backToAll === "all", backToAll);
 
   // --- user-defined statuses ----------------------------------------------
   // The vocabulary is data now. This drives the wasm boundary: create a custom
