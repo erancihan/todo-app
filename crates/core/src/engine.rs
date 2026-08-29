@@ -248,14 +248,6 @@ impl<S: Store> Engine<S> {
             .collect())
     }
 
-    fn category_of(&self, status_id: &str) -> Result<StatusCategory> {
-        Ok(self
-            .status_categories()?
-            .get(status_id)
-            .copied()
-            .unwrap_or(StatusCategory::Open))
-    }
-
     /// The status `x` lands on within a category — the lowest-sorted live one.
     fn default_status(&self, category: StatusCategory) -> Result<String> {
         let rows = self.store.query(
