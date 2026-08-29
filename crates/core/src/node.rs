@@ -18,16 +18,39 @@ pub enum Kind {
     ChecklistItem,
 }
 
-/// Drives the report buckets. `Done` sets `completed_at`.
+/// What a status *means* to the engine, independent of what it is called.
+///
+/// Statuses themselves are user-defined rows (docs direction change: Daybook is
+/// a general tracker, and "Waiting" vs "Blocked" vs both is the user's call, not
+/// the schema's). The engine only ever needs three semantics: does this count as
+/// work left (`Open`), work finished (`Done` — sets `completed_at`, lands in the
+/// report's COMPLETED bucket), or work abandoned (`Cancelled` — out of open
+/// counts, never carries over, and not an accomplishment either).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Status {
-    Inbox,
-    Todo,
-    InProgress,
-    Blocked,
+pub enum StatusCategory {
+    Open,
     Done,
-    Dropped,
+    Cancelled,
+}
+
+impl StatusCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StatusCategory::Open => "open",
+            StatusCategory::Done => "done",
+            StatusCategory::Cancelled => "cancelled",
+        }
+    }
+
+    /// Unknown reads as `Open` — the degradation that never hides work.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "done" => StatusCategory::Done,
+            "cancelled" => StatusCategory::Cancelled,
+            _ => StatusCategory::Open,
+        }
+    }
 }
 
 impl Kind {
@@ -45,37 +68,6 @@ impl Kind {
             "checklist_item" => Kind::ChecklistItem,
             _ => Kind::Task,
         }
-    }
-}
-
-impl Status {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Status::Inbox => "inbox",
-            Status::Todo => "todo",
-            Status::InProgress => "in_progress",
-            Status::Blocked => "blocked",
-            Status::Done => "done",
-            Status::Dropped => "dropped",
-        }
-    }
-
-    pub fn parse(s: &str) -> Self {
-        match s {
-            "todo" => Status::Todo,
-            "in_progress" => Status::InProgress,
-            "blocked" => Status::Blocked,
-            "done" => Status::Done,
-            "dropped" => Status::Dropped,
-            _ => Status::Inbox,
-        }
-    }
-
-    /// Whether this status counts as finished. `dropped` is deliberately *not*
-    /// done: it is abandoned work, and the EOD report must not claim it as an
-    /// accomplishment.
-    pub fn is_done(self) -> bool {
-        matches!(self, Status::Done)
     }
 }
 
@@ -97,7 +89,8 @@ pub struct Node {
     pub kind: Kind,
     pub promoted: bool,
     pub title: String,
-    pub status: Status,
+    /// The id of a row in the `status` table.
+    pub status: String,
     /// base62 fractional index + `:deviceId` jitter (see [`crate::order_key`]).
     pub order_key: String,
     pub created_at: i64,

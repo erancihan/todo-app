@@ -37,10 +37,10 @@ pub mod store;
 pub mod wasm;
 
 pub use body::{BodyCrdt, BodyUpdate, StateVector, YrsBody};
-pub use engine::{CollectionView, Engine, EventView, NodeView, TagView};
+pub use engine::{CollectionView, Engine, EventView, NodeView, StatusView, TagView};
 pub use hlc::{Hlc, HlcClock};
 pub use ids::{new_id, DeviceId, Id};
-pub use node::{Kind, Status};
+pub use node::{Kind, StatusCategory};
 pub use store::{SqlValue, Store, StoreExt};
 
 /// Errors surfaced across the engine port to the TypeScript core/engine layer.

@@ -606,19 +606,29 @@
                 </div>
 
                 <div>
-                  <h3 class="mb-1.5 text-[0.6875rem] font-[590] tracking-[0.06em] text-muted-foreground uppercase">
+                  <h3 class="mb-1.5 flex items-center text-[0.6875rem] font-[590] tracking-[0.06em] text-muted-foreground uppercase">
                     Status
+                    <button
+                      type="button"
+                      class="ml-auto font-sans font-normal normal-case hover:text-foreground"
+                      title="Edit statuses"
+                      @click="openStatusEditor()"
+                    >
+                      Edit…
+                    </button>
                   </h3>
+                  <!-- The vocabulary is the user's: these chips are rows in the
+                       status table, not an enum. -->
                   <div class="flex flex-wrap gap-1">
-                    <template x-for="s in STATUSES" :key="s.value">
+                    <template x-for="s in state.allStatuses" :key="s.id">
                       <button
                         type="button"
                         class="rounded-[var(--radius-sm)] border px-1.5 py-0.5 text-[0.6875rem]"
-                        :style="detail?.status === s.value
-                          ? `border-color: ${s.color}; color: ${s.color}`
+                        :style="detail?.status === s.id
+                          ? `border-color: ${statusColor(s.color)}; color: ${statusColor(s.color)}`
                           : 'border-color: var(--border); color: var(--muted-foreground)'"
-                        @click="setStatus(s.value)"
-                        x-text="s.label"
+                        @click="setStatus(s.id)"
+                        x-text="s.name"
                       ></button>
                     </template>
                   </div>
@@ -724,8 +734,8 @@
                     >
                       <span
                         class="font-mono text-[0.8125rem]"
-                        :style="item.status === 'done' ? 'color: var(--success)' : 'color: var(--muted-foreground)'"
-                        x-text="item.status === 'done' ? '[x]' : '[ ]'"
+                        :style="item.statusCategory === 'done' ? 'color: var(--success)' : 'color: var(--muted-foreground)'"
+                        x-text="item.statusCategory === 'done' ? '[x]' : '[ ]'"
                       ></span>
                       <span class="min-w-0">
                         <span
@@ -831,12 +841,20 @@
                 <template x-for="tag in focused?.tags ?? []" :key="tag.id">
                   <button
                     type="button"
-                    class="rounded-full px-2 py-0.5 text-[0.6875rem]"
+                    class="flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[0.6875rem]"
                     :class="`tag-${tag.color}`"
                     @click="dropTag(tag.id)"
                     :title="`Remove #${tag.name}`"
-                    x-text="`#${tag.name} ×`"
-                  ></button>
+                  >
+                    <!-- The dot recolors; the rest of the chip removes. -->
+                    <span
+                      class="size-[8px] rounded-full border border-current"
+                      style="background: currentcolor"
+                      title="Change colour"
+                      @click="cycleTagColor(tag.id, $event)"
+                    ></span>
+                    <span x-text="`#${tag.name} ×`"></span>
+                  </button>
                 </template>
               </div>
 
@@ -924,6 +942,96 @@
             @keydown.enter.prevent="submitCollection()"
             @keydown.escape.prevent="closeOverlays(); collectionDraft = ''"
           />
+        </div>
+      </div>
+
+      <!-- Statuses editor: the vocabulary itself is data. Category is fixed at
+           creation because it is what a status *means* — flipping "Waiting" to
+           a done-category later would silently change history. -->
+      <div
+        x-show="state.statusEditorOpen"
+        x-cloak
+        class="fixed inset-0 z-50 flex items-start justify-center p-6 pt-[18vh]"
+        style="background: rgb(0 0 0 / 0.55)"
+        @click="closeOverlays()"
+      >
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Statuses"
+          class="w-full max-w-md rounded-[var(--radius-lg)] border p-4"
+          style="border-color: var(--border); background: var(--popover)"
+          @click.stop
+        >
+          <h2 class="mb-1 text-[0.8125rem] font-[560]">Statuses</h2>
+          <p class="mb-3 text-[0.6875rem] text-muted-foreground">
+            Rename anything, add your own, keep both Waiting and Blocked if you like.
+            The dot cycles the colour; at least one open and one done status must remain.
+          </p>
+
+          <div class="mb-3 flex flex-col gap-1">
+            <template x-for="s in state.allStatuses" :key="s.id">
+              <div class="flex items-center gap-2 rounded-[var(--radius-sm)] px-1 py-0.5 hover:bg-muted">
+                <button
+                  type="button"
+                  class="size-[12px] shrink-0 rounded-full border"
+                  :style="`background: ${statusColor(s.color)}; border-color: var(--border)`"
+                  title="Change colour"
+                  :aria-label="`Change colour of ${s.name}`"
+                  @click="cycleStatusColor(s.id)"
+                ></button>
+                <input
+                  type="text"
+                  class="min-w-0 flex-1 bg-transparent text-[0.8125rem] outline-none"
+                  :value="s.name"
+                  :aria-label="`Rename ${s.name}`"
+                  @change="renameStatusTo(s.id, $event.target.value)"
+                  @keydown.enter.prevent="$event.target.blur()"
+                />
+                <span
+                  class="rounded-full border px-1.5 text-[0.625rem] text-muted-foreground"
+                  style="border-color: var(--border)"
+                  x-text="s.category"
+                ></span>
+                <button
+                  type="button"
+                  class="px-1 text-muted-foreground hover:text-foreground"
+                  :title="`Delete ${s.name}`"
+                  :aria-label="`Delete ${s.name}`"
+                  @click="removeStatus(s.id)"
+                >
+                  ×
+                </button>
+              </div>
+            </template>
+          </div>
+
+          <form class="flex items-center gap-2" @submit.prevent="submitNewStatus()">
+            <input
+              type="text"
+              placeholder="New status…"
+              x-model="newStatusDraft"
+              class="min-w-0 flex-1 rounded-[var(--radius-sm)] border bg-transparent px-2 py-1 text-[0.8125rem] outline-none"
+              style="border-color: var(--border)"
+            />
+            <select
+              x-model="newStatusCategory"
+              class="rounded-[var(--radius-sm)] border bg-transparent px-1 py-1 text-[0.75rem]"
+              style="border-color: var(--border); background: var(--popover)"
+              aria-label="Category of the new status"
+            >
+              <option value="open">open</option>
+              <option value="done">done</option>
+              <option value="cancelled">cancelled</option>
+            </select>
+            <button
+              type="submit"
+              class="rounded-[var(--radius-sm)] border px-2 py-1 text-[0.75rem]"
+              style="border-color: var(--primary); color: var(--primary)"
+            >
+              Add
+            </button>
+          </form>
         </div>
       </div>
 

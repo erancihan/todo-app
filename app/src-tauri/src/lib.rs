@@ -13,10 +13,10 @@ use std::sync::Mutex;
 
 use daybook_core::engine::{BlobMeta, BlobView};
 use daybook_core::ids::DeviceId;
-use daybook_core::node::Status;
+use daybook_core::node::StatusCategory;
 use daybook_core::report::{Report, ReportOptions};
 use daybook_core::store::SqliteStore;
-use daybook_core::{CollectionView, Engine, EventView, NodeView, TagView};
+use daybook_core::{CollectionView, Engine, EventView, NodeView, StatusView, TagView};
 use tauri::Manager;
 
 /// The engine, plus the identity it runs under.
@@ -113,7 +113,71 @@ fn set_status(state: tauri::State<'_, AppState>, id: String, status: String) -> 
         .engine
         .lock()
         .unwrap()
-        .set_status(&id, Status::parse(&status))
+        .set_status(&id, &status)
+        .map_err(to_err)
+}
+
+#[tauri::command]
+fn set_tag_color(
+    state: tauri::State<'_, AppState>,
+    tag_id: String,
+    color: String,
+) -> CmdResult<()> {
+    state
+        .engine
+        .lock()
+        .unwrap()
+        .set_tag_color(&tag_id, &color)
+        .map_err(to_err)
+}
+
+#[tauri::command]
+fn list_statuses(state: tauri::State<'_, AppState>) -> CmdResult<Vec<StatusView>> {
+    state.engine.lock().unwrap().list_statuses().map_err(to_err)
+}
+
+#[tauri::command]
+fn create_status(
+    state: tauri::State<'_, AppState>,
+    name: String,
+    category: String,
+    color: Option<String>,
+) -> CmdResult<StatusView> {
+    state
+        .engine
+        .lock()
+        .unwrap()
+        .create_status(&name, StatusCategory::parse(&category), color.as_deref())
+        .map_err(to_err)
+}
+
+#[tauri::command]
+fn rename_status(state: tauri::State<'_, AppState>, id: String, name: String) -> CmdResult<()> {
+    state
+        .engine
+        .lock()
+        .unwrap()
+        .rename_status(&id, &name)
+        .map_err(to_err)
+}
+
+#[tauri::command]
+fn set_status_color(state: tauri::State<'_, AppState>, id: String, color: String) -> CmdResult<()> {
+    state
+        .engine
+        .lock()
+        .unwrap()
+        .set_status_color(&id, &color)
+        .map_err(to_err)
+}
+
+#[tauri::command]
+fn delete_status(state: tauri::State<'_, AppState>, id: String) -> CmdResult<()> {
+    state
+        .engine
+        .lock()
+        .unwrap()
+        .delete_status(&id)
         .map_err(to_err)
 }
 
@@ -405,6 +469,12 @@ pub fn run() {
             set_title,
             set_body,
             set_status,
+            list_statuses,
+            create_status,
+            rename_status,
+            set_status_color,
+            delete_status,
+            set_tag_color,
             toggle_done,
             promote,
             demote,

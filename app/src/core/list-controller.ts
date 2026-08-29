@@ -19,6 +19,8 @@ import type {
   NodeView,
   Report,
   Status,
+  StatusCategory,
+  StatusView,
   TagView,
 } from "./engine-port";
 import { fromEvent, resolveKey, shouldPreventDefault, type Action, type Mode } from "./keymap";
@@ -48,6 +50,10 @@ export interface ListState {
   allTags: TagView[];
   /** Every collection in the account, for the picker. */
   allCollections: CollectionView[];
+  /** Every status, user-defined ones included, in sort order. */
+  allStatuses: StatusView[];
+  /** Whether the statuses editor overlay is open. */
+  statusEditorOpen: boolean;
   /**
    * The node whose DetailedTodoView is open, if any.
    *
@@ -120,6 +126,8 @@ export class ListController {
     searchOpen: false,
     allTags: [],
     allCollections: [],
+    allStatuses: [],
+    statusEditorOpen: false,
     detailId: null,
     report: null,
     reportDay: "",
@@ -184,10 +192,11 @@ export class ListController {
   // -- data ----------------------------------------------------------------
 
   async refresh(): Promise<void> {
-    const [nodes, allTags, allCollections] = await Promise.all([
+    const [nodes, allTags, allCollections, allStatuses] = await Promise.all([
       this.engine.listTree(),
       this.engine.listTags(),
       this.engine.listCollections(),
+      this.engine.listStatuses(),
     ]);
     // Keep focus on the same node across a refresh; fall back to the first row
     // if it vanished (deleted, or moved out of view).
@@ -203,7 +212,7 @@ export class ListController {
     // Same for a detail view whose todo was deleted — it would render an empty
     // page with no way back except Esc.
     const detailId = nodes.some((n) => n.id === this.state.detailId) ? this.state.detailId : null;
-    this.patch({ nodes, allTags, allCollections, focusedId, activeCollectionId, detailId });
+    this.patch({ nodes, allTags, allCollections, allStatuses, focusedId, activeCollectionId, detailId });
   }
 
   /**
@@ -259,7 +268,7 @@ export class ListController {
       if (!parent) continue;
       const entry = counts.get(parent) ?? { done: 0, total: 0 };
       entry.total += 1;
-      if (node.status === "done") entry.done += 1;
+      if (node.statusCategory === "done") entry.done += 1;
       counts.set(parent, entry);
     }
     this.childCountsCache = { nodes: this.state.nodes, counts };
@@ -376,7 +385,7 @@ export class ListController {
     const counts = new Map<string | null, number>();
     let all = 0;
     for (const node of this.state.nodes) {
-      if (node.status === "done" || node.status === "dropped") continue;
+      if (node.statusCategory !== "open") continue;
       all += 1;
       for (const id of node.collectionIds) counts.set(id, (counts.get(id) ?? 0) + 1);
     }
@@ -584,7 +593,7 @@ export class ListController {
         !n.hasChildren &&
         n.tags.length === 0 &&
         n.collectionIds.length === 0 &&
-        n.status !== "done",
+        n.statusCategory !== "done",
     );
     if (empty.length === 0) return;
 
@@ -609,7 +618,7 @@ export class ListController {
       !node.hasChildren &&
       node.tags.length === 0 &&
       filedByHand.length === 0 &&
-      node.status !== "done";
+      node.statusCategory !== "done";
     if (!empty) return;
 
     // Move focus off the row first so it does not land on a deleted node.
@@ -943,6 +952,8 @@ export class ListController {
         return this.openReport();
       case "open-detail":
         return this.openDetail();
+      case "open-status-editor":
+        return this.openStatusEditor();
       case "toggle-sidebar":
         return this.setSidebarCollapsed(!this.state.sidebarCollapsed);
       case "select-collection": {
@@ -967,7 +978,8 @@ export class ListController {
           this.state.cheatSheetOpen ||
           this.state.paletteOpen ||
           this.state.tagEditorOpen ||
-          this.state.collectionPickerOpen
+          this.state.collectionPickerOpen ||
+          this.state.statusEditorOpen
         ) {
           return this.closeOverlays();
         }
@@ -1104,6 +1116,38 @@ export class ListController {
     });
   }
 
+  // -- status vocabulary ---------------------------------------------------
+
+  openStatusEditor() {
+    this.patch({ statusEditorOpen: true });
+  }
+
+  async createStatus(name: string, category: StatusCategory): Promise<void> {
+    return this.run(() => this.engine.createStatus(name, category, null));
+  }
+
+  async renameStatus(id: string, name: string): Promise<void> {
+    return this.run(() => this.engine.renameStatus(id, name));
+  }
+
+  async cycleStatusColor(id: string): Promise<void> {
+    const hues = ["slate", "rose", "amber", "pink", "emerald", "cyan", "violet", "lime", ""];
+    const current = this.state.allStatuses.find((s) => s.id === id)?.color ?? "";
+    const next = hues[(hues.indexOf(current) + 1) % hues.length]!;
+    return this.run(() => this.engine.setStatusColor(id, next));
+  }
+
+  async deleteStatus(id: string): Promise<void> {
+    return this.run(() => this.engine.deleteStatus(id));
+  }
+
+  async cycleTagColor(tagId: string): Promise<void> {
+    const hues = ["slate", "rose", "amber", "pink", "emerald", "cyan", "violet", "lime"];
+    const current = this.state.allTags.find((t) => t.id === tagId)?.color ?? "slate";
+    const next = hues[(hues.indexOf(current) + 1) % hues.length]!;
+    return this.run(() => this.engine.setTagColor(tagId, next));
+  }
+
   setQuery(query: string) {
     this.patch({ query });
   }
@@ -1155,7 +1199,8 @@ export class ListController {
       this.state.cheatSheetOpen ||
       this.state.paletteOpen ||
       this.state.tagEditorOpen ||
-      this.state.collectionPickerOpen;
+      this.state.collectionPickerOpen ||
+      this.state.statusEditorOpen;
     if (wasOpen) this.host.closeEditor();
 
     this.patch({
@@ -1163,6 +1208,7 @@ export class ListController {
       paletteOpen: false,
       tagEditorOpen: false,
       collectionPickerOpen: false,
+      statusEditorOpen: false,
     });
   }
 

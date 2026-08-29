@@ -27,7 +27,7 @@ use crate::body::{BodyCrdt, BodyUpdate, YrsBody};
 use crate::event::EventType;
 use crate::hlc::{Hlc, HlcClock};
 use crate::ids::{new_id, DeviceId};
-use crate::node::{Kind, Status, MAX_DEPTH};
+use crate::node::{Kind, StatusCategory, MAX_DEPTH};
 use crate::order_key;
 use crate::store::{SqlValue, Store, StoreExt};
 use crate::{CoreError, Result};
@@ -42,7 +42,11 @@ pub struct NodeView {
     pub promoted: bool,
     pub title: String,
     pub body_md: String,
-    pub status: Status,
+    /// The id of a user-defined status row.
+    pub status: String,
+    /// The status's semantic, resolved at read time so the UI and the report
+    /// never have to join the status table themselves.
+    pub status_category: StatusCategory,
     pub order_key: String,
     pub created_at: i64,
     pub updated_at: i64,
@@ -86,6 +90,18 @@ pub struct EventView {
     pub to_value: Option<String>,
     pub occurred_at: String,
     pub occurred_ms: i64,
+}
+
+/// One user-defined status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusView {
+    pub id: String,
+    pub name: String,
+    pub category: StatusCategory,
+    pub color: String,
+    pub sort: i64,
+    pub built_in: bool,
 }
 
 /// An attachment with its bytes.
@@ -133,16 +149,253 @@ impl<S: Store> Engine<S> {
     /// Open an engine over `store`, applying the schema if needed.
     pub fn open(store: S, account_id: impl Into<String>, device: DeviceId) -> Result<Self> {
         store.init_schema()?;
-        Ok(Self {
+        let engine = Self {
             store,
             account_id: account_id.into(),
             clock: RefCell::new(HlcClock::new(device.clone())),
             device,
+        };
+        engine.seed_statuses()?;
+        Ok(engine)
+    }
+
+    /// First run for an account: install the default status set.
+    ///
+    /// The built-in ids equal the old hard-coded enum strings, which is what
+    /// makes this a zero-migration change — every `node.status` value written
+    /// before statuses were data already names a seeded row. Seeding checks for
+    /// *any* row (deleted included), so a user who removes a built-in does not
+    /// get it resurrected on the next launch.
+    fn seed_statuses(&self) -> Result<()> {
+        let existing = self
+            .store
+            .query_i64(
+                "SELECT COUNT(*) FROM status WHERE account_id = ?",
+                &[self.account()],
+            )?
+            .unwrap_or(0);
+        if existing > 0 {
+            return Ok(());
+        }
+
+        // Both "Waiting" and "Blocked" ship: which of them (or neither, or both)
+        // survives is a user decision, and deleting is easier than inventing.
+        let seed: [(&str, &str, StatusCategory, &str); 6] = [
+            ("todo", "Todo", StatusCategory::Open, ""),
+            ("in_progress", "In progress", StatusCategory::Open, "amber"),
+            ("waiting", "Waiting", StatusCategory::Open, "violet"),
+            ("blocked", "Blocked", StatusCategory::Open, "rose"),
+            ("done", "Done", StatusCategory::Done, "emerald"),
+            ("dropped", "Dropped", StatusCategory::Cancelled, "slate"),
+        ];
+        for (sort, (id, name, category, color)) in seed.iter().enumerate() {
+            self.store.execute(
+                "INSERT INTO status (account_id, id, name, category, color, sort, built_in) \
+                 VALUES (?, ?, ?, ?, ?, ?, 1)",
+                &[
+                    self.account(),
+                    (*id).into(),
+                    (*name).into(),
+                    category.as_str().into(),
+                    (*color).into(),
+                    (sort as i64).into(),
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    // -- statuses ------------------------------------------------------------
+
+    /// Every live status, in sort order.
+    pub fn list_statuses(&self) -> Result<Vec<StatusView>> {
+        let rows = self.store.query(
+            "SELECT id, name, category, color, sort, built_in FROM status \
+             WHERE account_id = ? AND deleted = 0 ORDER BY sort, name",
+            &[self.account()],
+        )?;
+        Ok(rows
+            .iter()
+            .map(|r| StatusView {
+                id: r[0].text_or_default(),
+                name: r[1].text_or_default(),
+                category: StatusCategory::parse(&r[2].text_or_default()),
+                color: r[3].text_or_default(),
+                sort: r[4].as_i64().unwrap_or(0),
+                built_in: r[5].as_i64().unwrap_or(0) != 0,
+            })
+            .collect())
+    }
+
+    /// `status id -> category` for every status ever created, deleted included.
+    ///
+    /// Deleted ones stay resolvable because nodes written before a deletion (or
+    /// arriving later over sync) may still carry the id; an unknown id reads as
+    /// `Open`, which is the degradation that never hides work.
+    fn status_categories(&self) -> Result<HashMap<String, StatusCategory>> {
+        let rows = self.store.query(
+            "SELECT id, category FROM status WHERE account_id = ?",
+            &[self.account()],
+        )?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    r[0].text_or_default(),
+                    StatusCategory::parse(&r[1].text_or_default()),
+                )
+            })
+            .collect())
+    }
+
+    fn category_of(&self, status_id: &str) -> Result<StatusCategory> {
+        Ok(self
+            .status_categories()?
+            .get(status_id)
+            .copied()
+            .unwrap_or(StatusCategory::Open))
+    }
+
+    /// The status `x` lands on within a category — the lowest-sorted live one.
+    fn default_status(&self, category: StatusCategory) -> Result<String> {
+        let rows = self.store.query(
+            "SELECT id FROM status WHERE account_id = ? AND deleted = 0 AND category = ? \
+             ORDER BY sort, name LIMIT 1",
+            &[self.account(), category.as_str().into()],
+        )?;
+        rows.first()
+            .map(|r| r[0].text_or_default())
+            .ok_or_else(|| CoreError::Store(format!("no {} status exists", category.as_str())))
+    }
+
+    /// The id `x` reopens to — public so the report can mute the default status.
+    pub fn default_open_status_id(&self) -> Result<String> {
+        self.default_status(StatusCategory::Open)
+    }
+
+    /// Add a status. The color is picked round-robin like tags when not given.
+    pub fn create_status(
+        &self,
+        name: &str,
+        category: StatusCategory,
+        color: Option<&str>,
+    ) -> Result<StatusView> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(CoreError::Store("status name cannot be empty".into()));
+        }
+        let id = new_id().to_string();
+        let count = self
+            .store
+            .query_i64(
+                "SELECT COUNT(*) FROM status WHERE account_id = ?",
+                &[self.account()],
+            )?
+            .unwrap_or(0);
+        let color = color
+            .map(str::to_owned)
+            .unwrap_or_else(|| HUES[count as usize % HUES.len()].to_owned());
+        let sort = self
+            .store
+            .query_i64(
+                "SELECT COALESCE(MAX(sort), -1) + 1 FROM status WHERE account_id = ?",
+                &[self.account()],
+            )?
+            .unwrap_or(0);
+        self.store.execute(
+            "INSERT INTO status (account_id, id, name, category, color, sort, built_in) \
+             VALUES (?, ?, ?, ?, ?, ?, 0)",
+            &[
+                self.account(),
+                id.as_str().into(),
+                name.into(),
+                category.as_str().into(),
+                color.as_str().into(),
+                sort.into(),
+            ],
+        )?;
+        Ok(StatusView {
+            id,
+            name: name.to_owned(),
+            category,
+            color,
+            sort,
+            built_in: false,
+        })
+    }
+
+    pub fn rename_status(&self, id: &str, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(CoreError::Store("status name cannot be empty".into()));
+        }
+        self.store.execute(
+            "UPDATE status SET name = ? WHERE account_id = ? AND id = ? AND deleted = 0",
+            &[name.into(), self.account(), id.into()],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_status_color(&self, id: &str, color: &str) -> Result<()> {
+        self.store.execute(
+            "UPDATE status SET color = ? WHERE account_id = ? AND id = ?",
+            &[color.into(), self.account(), id.into()],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a status, reassigning its nodes to the category default.
+    ///
+    /// Refused when it would leave no `Open` or no `Done` status — `x` needs a
+    /// landing place in both directions. The row is tombstoned rather than
+    /// erased so ids arriving over Phase 2 sync still resolve to a category.
+    pub fn delete_status(&self, id: &str) -> Result<()> {
+        let statuses = self.list_statuses()?;
+        let Some(doomed) = statuses.iter().find(|s| s.id == id) else {
+            return Err(CoreError::Store(format!("no such status: {id}")));
+        };
+        let survivors = |cat: StatusCategory| {
+            statuses
+                .iter()
+                .filter(|s| s.category == cat && s.id != id)
+                .count()
+        };
+        if (doomed.category == StatusCategory::Open && survivors(StatusCategory::Open) == 0)
+            || (doomed.category == StatusCategory::Done && survivors(StatusCategory::Done) == 0)
+        {
+            return Err(CoreError::Store(
+                "cannot delete the last open or done status".into(),
+            ));
+        }
+
+        self.store.transaction(|| {
+            self.store.execute(
+                "UPDATE status SET deleted = 1 WHERE account_id = ? AND id = ?",
+                &[self.account(), id.into()],
+            )?;
+            // Reassign in place, without per-node events: this is an admin
+            // reshaping of vocabulary, not a day of activity, and a thousand
+            // `updated` events here would drown the EOD report in noise.
+            let fallback = self.default_status(match doomed.category {
+                StatusCategory::Done => StatusCategory::Done,
+                _ => StatusCategory::Open,
+            })?;
+            self.store.execute(
+                "UPDATE node SET status = ? WHERE account_id = ? AND status = ?",
+                &[fallback.as_str().into(), self.account(), id.into()],
+            )?;
+            Ok(())
         })
     }
 
     pub fn store(&self) -> &S {
         &self.store
+    }
+
+    /// Take the store back — lets a test reopen the same database as a fresh
+    /// engine, which is how "state survives a relaunch" is provable in-memory.
+    pub fn into_store(self) -> S {
+        self.store
     }
 
     pub fn account_id(&self) -> &str {
@@ -309,7 +562,7 @@ impl<S: Store> Engine<S> {
                     parent_id.map(str::to_owned).into(),
                     kind.as_str().into(),
                     title.into(),
-                    Status::Todo.as_str().into(),
+                    self.default_status(StatusCategory::Open)?.as_str().into(),
                     order_key.as_str().into(),
                     now.into(),
                     now.into(),
@@ -335,7 +588,7 @@ impl<S: Store> Engine<S> {
             return Ok(None);
         };
 
-        let mut view = decode_node(&row, 0);
+        let mut view = decode_node(&row, 0, &self.status_categories()?);
         view.has_children = self
             .store
             .query_i64(
@@ -364,9 +617,10 @@ impl<S: Store> Engine<S> {
             &[self.account()],
         )?;
 
+        let categories = self.status_categories()?;
         let mut by_parent: HashMap<Option<String>, Vec<NodeView>> = HashMap::new();
         for row in &rows {
-            let view = decode_node(row, 0);
+            let view = decode_node(row, 0, &categories);
             by_parent
                 .entry(view.parent_id.clone())
                 .or_default()
@@ -572,27 +826,29 @@ impl<S: Store> Engine<S> {
         hash & ((1u64 << 53) - 1)
     }
 
-    pub fn set_status(&self, id: &str, status: Status) -> Result<()> {
+    pub fn set_status(&self, id: &str, status_id: &str) -> Result<()> {
         let at = self.stamp();
         let Some(node) = self.node(id)? else {
             return Err(CoreError::Store(format!("no such node: {id}")));
         };
-        if node.status == status {
+        if node.status == status_id {
             return Ok(());
         }
+        let statuses = self.status_categories()?;
+        let Some(&category) = statuses.get(status_id) else {
+            return Err(CoreError::Store(format!("no such status: {status_id}")));
+        };
+        let was_done = node.status_category == StatusCategory::Done;
+        let is_done = category == StatusCategory::Done;
 
         let now = at.wall_ms as i64;
-        let completed_at: SqlValue = if status.is_done() {
-            now.into()
-        } else {
-            SqlValue::Null
-        };
+        let completed_at: SqlValue = if is_done { now.into() } else { SqlValue::Null };
 
         self.store.transaction(|| {
             self.store.execute(
                 "UPDATE node SET status = ?, completed_at = ? WHERE account_id = ? AND id = ?",
                 &[
-                    status.as_str().into(),
+                    status_id.into(),
                     completed_at.clone(),
                     self.account(),
                     id.into(),
@@ -602,38 +858,31 @@ impl<S: Store> Engine<S> {
 
             // Three distinct event types, because the report reads them
             // differently: `completed` is an accomplishment, `reopened` undoes
-            // one, and a move between open states is just progress.
-            let kind = if status.is_done() {
+            // one, and a move between open states is just progress. Category,
+            // not id, decides which — renaming "Done" must not change what
+            // finishing a task means.
+            let kind = if is_done && !was_done {
                 EventType::Completed
-            } else if node.status.is_done() {
+            } else if was_done && !is_done {
                 EventType::Reopened
             } else {
                 EventType::StatusChanged
             };
-            self.emit(
-                &at,
-                id,
-                kind,
-                Some(node.status.as_str()),
-                Some(status.as_str()),
-                None,
-            )
+            self.emit(&at, id, kind, Some(&node.status), Some(status_id), None)
         })
     }
 
-    /// `x` — flip between done and todo.
+    /// `x` — flip between the default done and default open status.
     pub fn toggle_done(&self, id: &str) -> Result<()> {
         let Some(node) = self.node(id)? else {
             return Err(CoreError::Store(format!("no such node: {id}")));
         };
-        self.set_status(
-            id,
-            if node.status.is_done() {
-                Status::Todo
-            } else {
-                Status::Done
-            },
-        )
+        let target = if node.status_category == StatusCategory::Done {
+            self.default_status(StatusCategory::Open)?
+        } else {
+            self.default_status(StatusCategory::Done)?
+        };
+        self.set_status(id, &target)
     }
 
     /// `p` — promote a sub-item to a full todo **in place**.
@@ -1050,6 +1299,15 @@ impl<S: Store> Engine<S> {
         })
     }
 
+    /// Recolor a tag. The auto-assigned hue is a default, not a sentence.
+    pub fn set_tag_color(&self, tag_id: &str, color: &str) -> Result<()> {
+        self.store.execute(
+            "UPDATE tag SET color = ? WHERE account_id = ? AND id = ?",
+            &[color.into(), self.account(), tag_id.into()],
+        )?;
+        Ok(())
+    }
+
     pub fn list_tags(&self) -> Result<Vec<TagView>> {
         let rows = self.store.query(
             "SELECT id, name, color FROM tag WHERE account_id = ? AND deleted = 0 ORDER BY name",
@@ -1383,7 +1641,12 @@ impl<S: Store> Engine<S> {
 
 // -- helpers ---------------------------------------------------------------
 
-fn decode_node(row: &[SqlValue], depth: usize) -> NodeView {
+fn decode_node(
+    row: &[SqlValue],
+    depth: usize,
+    categories: &HashMap<String, StatusCategory>,
+) -> NodeView {
+    let status = row[6].text_or_default();
     NodeView {
         id: row[0].text_or_default(),
         parent_id: row[1].as_str().map(str::to_owned),
@@ -1391,7 +1654,12 @@ fn decode_node(row: &[SqlValue], depth: usize) -> NodeView {
         promoted: row[3].as_bool(),
         title: row[4].text_or_default(),
         body_md: row[5].text_or_default(),
-        status: Status::parse(&row[6].text_or_default()),
+        // An unknown id resolves Open — never hide work over vocabulary.
+        status_category: categories
+            .get(&status)
+            .copied()
+            .unwrap_or(StatusCategory::Open),
+        status,
         order_key: row[7].text_or_default(),
         created_at: row[8].as_i64().unwrap_or(0),
         updated_at: row[9].as_i64().unwrap_or(0),
@@ -1743,6 +2011,146 @@ mod tests {
     }
 
     #[test]
+    fn statuses_are_seeded_once_with_categories() {
+        let e = engine();
+        let statuses = e.list_statuses().unwrap();
+        let ids: Vec<&str> = statuses.iter().map(|s| s.id.as_str()).collect();
+        // Both Waiting and Blocked ship; which survives is the user's call.
+        assert_eq!(
+            ids,
+            [
+                "todo",
+                "in_progress",
+                "waiting",
+                "blocked",
+                "done",
+                "dropped"
+            ]
+        );
+        assert!(statuses.iter().all(|s| s.built_in));
+    }
+
+    #[test]
+    fn a_custom_status_works_end_to_end() {
+        let e = engine();
+        let errand = e
+            .create_status("On hold", StatusCategory::Open, None)
+            .unwrap();
+        let node = e.create_node(None, "Call the bank", None).unwrap();
+
+        e.set_status(&node.id, &errand.id).unwrap();
+        let read = e.node(&node.id).unwrap().unwrap();
+        assert_eq!(read.status, errand.id);
+        assert_eq!(read.status_category, StatusCategory::Open);
+
+        // `x` still lands on the default done status, whatever else exists.
+        e.toggle_done(&node.id).unwrap();
+        assert_eq!(e.node(&node.id).unwrap().unwrap().status, "done");
+    }
+
+    #[test]
+    fn a_custom_done_status_completes_like_done() {
+        let e = engine();
+        let shipped = e
+            .create_status("Handed over", StatusCategory::Done, None)
+            .unwrap();
+        let node = e.create_node(None, "Lend the drill", None).unwrap();
+        e.set_status(&node.id, &shipped.id).unwrap();
+
+        let read = e.node(&node.id).unwrap().unwrap();
+        assert_eq!(read.status_category, StatusCategory::Done);
+        assert!(
+            read.completed_at.is_some(),
+            "a done-category status must complete"
+        );
+
+        let events = e.events_for_node(&node.id).unwrap();
+        assert!(
+            events.iter().any(|ev| ev.r#type == "completed"),
+            "category, not id, decides what finishing means"
+        );
+    }
+
+    #[test]
+    fn deleting_a_status_reassigns_its_nodes() {
+        let e = engine();
+        let node = e.create_node(None, "Waiting on plumber", None).unwrap();
+        e.set_status(&node.id, "waiting").unwrap();
+
+        e.delete_status("waiting").unwrap();
+        assert_eq!(
+            e.node(&node.id).unwrap().unwrap().status,
+            "todo",
+            "orphaned nodes must land on the category default"
+        );
+        assert!(
+            !e.list_statuses().unwrap().iter().any(|s| s.id == "waiting"),
+            "deleted status still listed"
+        );
+    }
+
+    #[test]
+    fn the_last_open_and_done_statuses_cannot_be_deleted() {
+        let e = engine();
+        for id in ["in_progress", "waiting", "blocked"] {
+            e.delete_status(id).unwrap();
+        }
+        assert!(
+            e.delete_status("todo").is_err(),
+            "deleted the last open status"
+        );
+        assert!(
+            e.delete_status("done").is_err(),
+            "deleted the last done status"
+        );
+        // Dropped is cancelled-category and deletable.
+        e.delete_status("dropped").unwrap();
+    }
+
+    #[test]
+    fn deleted_builtins_stay_deleted_across_reopen() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.init_schema().unwrap();
+        let e = Engine::open(store, "acct-test", DeviceId::from("device-test-0001")).unwrap();
+        e.delete_status("blocked").unwrap();
+
+        // Same underlying store, fresh engine — a relaunch.
+        let store2 = e.into_store();
+        let e2 = Engine::open(store2, "acct-test", DeviceId::from("device-test-0001")).unwrap();
+        assert!(
+            !e2.list_statuses()
+                .unwrap()
+                .iter()
+                .any(|s| s.id == "blocked"),
+            "seeding resurrected a deleted built-in"
+        );
+    }
+
+    #[test]
+    fn renaming_done_does_not_change_what_finishing_means() {
+        let e = engine();
+        e.rename_status("done", "Shipped").unwrap();
+        let node = e.create_node(None, "task", None).unwrap();
+        e.toggle_done(&node.id).unwrap();
+        let read = e.node(&node.id).unwrap().unwrap();
+        assert_eq!(read.status_category, StatusCategory::Done);
+        assert!(read.completed_at.is_some());
+    }
+
+    #[test]
+    fn a_tag_can_be_recolored() {
+        let e = engine();
+        let node = e.create_node(None, "task", None).unwrap();
+        let tag = e.add_tag(&node.id, "garden").unwrap();
+        e.set_tag_color(&tag.id, "lime").unwrap();
+        assert_eq!(
+            e.list_tags().unwrap()[0].color,
+            "lime",
+            "recolor did not stick"
+        );
+    }
+
+    #[test]
     fn a_due_date_can_be_set_and_cleared() {
         let e = engine();
         let node = e.create_node(None, "task", None).unwrap();
@@ -1900,7 +2308,7 @@ mod tests {
 
         e.set_title(&node.id, "task").unwrap();
         e.set_body(&node.id, "").unwrap();
-        e.set_status(&node.id, Status::Todo).unwrap();
+        e.set_status(&node.id, "todo").unwrap();
 
         assert_eq!(e.events_for_node(&node.id).unwrap().len(), before);
     }
@@ -1911,12 +2319,13 @@ mod tests {
         let node = e.create_node(None, "task", None).unwrap();
         e.toggle_done(&node.id).unwrap();
         let done = e.node(&node.id).unwrap().unwrap();
-        assert_eq!(done.status, Status::Done);
+        assert_eq!(done.status, "done");
+        assert_eq!(done.status_category, StatusCategory::Done);
         assert!(done.completed_at.is_some());
 
         e.toggle_done(&node.id).unwrap();
         let reopened = e.node(&node.id).unwrap().unwrap();
-        assert_eq!(reopened.status, Status::Todo);
+        assert_eq!(reopened.status, "todo");
         assert!(reopened.completed_at.is_none());
     }
 
@@ -2038,7 +2447,7 @@ mod tests {
         let copy = e
             .duplicate_node(&source.id, None, Some(&source.id))
             .unwrap();
-        assert_eq!(copy.status, Status::Todo);
+        assert_eq!(copy.status, "todo");
         assert!(copy.completed_at.is_none());
     }
 

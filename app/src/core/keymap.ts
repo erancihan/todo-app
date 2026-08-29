@@ -42,6 +42,7 @@ export type Action =
   | "toggle-sidebar"
   | "select-collection"
   | "open-detail"
+  | "open-status-editor"
   | "clear"
   // --- EDIT mode ---
   | "newline"

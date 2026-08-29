@@ -30,6 +30,7 @@ export const PALETTE_COMMANDS: Command[] = [
   { id: "delete", label: "Delete", keys: ["d d"] },
   { id: "open-tags", label: "Edit tags", keys: ["t"] },
   { id: "open-collections", label: "Edit collections", keys: ["c"] },
+  { id: "open-status-editor", label: "Edit statuses", keys: [] },
   { id: "yank", label: "Copy todo", keys: ["y"] },
   { id: "paste", label: "Paste a copy", keys: ["P"] },
   { id: "toggle-sidebar", label: "Toggle sidebar", keys: ["Ctrl/Cmd+B"] },

@@ -22,7 +22,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::engine::Engine;
 use crate::ids::DeviceId;
-use crate::node::Status;
+use crate::node::StatusCategory;
 use crate::report::ReportOptions;
 use crate::store::{Row, SqlValue, Store};
 use crate::{CoreError, Result};
@@ -228,10 +228,54 @@ impl DaybookEngine {
 
     #[wasm_bindgen(js_name = setStatus)]
     pub fn set_status(&self, id: String, status: String) -> std::result::Result<(), JsValue> {
+        self.inner.borrow().set_status(&id, &status).map_err(err)
+    }
+
+    #[wasm_bindgen(js_name = setTagColor)]
+    pub fn set_tag_color(&self, tag_id: String, color: String) -> std::result::Result<(), JsValue> {
         self.inner
             .borrow()
-            .set_status(&id, Status::parse(&status))
+            .set_tag_color(&tag_id, &color)
             .map_err(err)
+    }
+
+    #[wasm_bindgen(js_name = listStatuses)]
+    pub fn list_statuses(&self) -> std::result::Result<JsValue, JsValue> {
+        to_js(&self.inner.borrow().list_statuses().map_err(err)?)
+    }
+
+    #[wasm_bindgen(js_name = createStatus)]
+    pub fn create_status(
+        &self,
+        name: String,
+        category: String,
+        color: Option<String>,
+    ) -> std::result::Result<JsValue, JsValue> {
+        to_js(
+            &self
+                .inner
+                .borrow()
+                .create_status(&name, StatusCategory::parse(&category), color.as_deref())
+                .map_err(err)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = renameStatus)]
+    pub fn rename_status(&self, id: String, name: String) -> std::result::Result<(), JsValue> {
+        self.inner.borrow().rename_status(&id, &name).map_err(err)
+    }
+
+    #[wasm_bindgen(js_name = setStatusColor)]
+    pub fn set_status_color(&self, id: String, color: String) -> std::result::Result<(), JsValue> {
+        self.inner
+            .borrow()
+            .set_status_color(&id, &color)
+            .map_err(err)
+    }
+
+    #[wasm_bindgen(js_name = deleteStatus)]
+    pub fn delete_status(&self, id: String) -> std::result::Result<(), JsValue> {
+        self.inner.borrow().delete_status(&id).map_err(err)
     }
 
     #[wasm_bindgen(js_name = toggleDone)]

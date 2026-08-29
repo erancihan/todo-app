@@ -226,6 +226,22 @@ CREATE TABLE IF NOT EXISTS event (
 CREATE INDEX IF NOT EXISTS event_by_time ON event (account_id, occurred_ms);
 CREATE INDEX IF NOT EXISTS event_by_node ON event (account_id, node_id);
 
+-- User-defined statuses. The engine reads only `category`; names, colours and
+-- how many exist are the user's. Built-ins are seeded with ids equal to the old
+-- enum strings ('todo', 'in_progress', …) so pre-existing node rows resolve with
+-- no migration — the node.status column value simply *is* a status id now.
+CREATE TABLE IF NOT EXISTS status (
+  account_id TEXT    NOT NULL,
+  id         TEXT    NOT NULL,
+  name       TEXT    NOT NULL,
+  category   TEXT    NOT NULL DEFAULT 'open',
+  color      TEXT    NOT NULL DEFAULT '',
+  sort       INTEGER NOT NULL DEFAULT 0,
+  built_in   INTEGER NOT NULL DEFAULT 0,
+  deleted    INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (account_id, id)
+);
+
 -- Attachments, content-addressed by SHA-256 (docs/02-architecture.md).
 -- The hash IS the identity: pasting the same screenshot into two todos stores
 -- one copy, and Phase 2's sync channel can ask for bytes by name without any

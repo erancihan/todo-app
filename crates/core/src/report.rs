@@ -20,7 +20,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::engine::{Engine, EventView, NodeView};
-use crate::node::Status;
+use crate::node::StatusCategory;
 use crate::store::{Store, StoreExt};
 use crate::Result;
 
@@ -102,7 +102,12 @@ impl Default for ReportOptions {
 pub struct ReportItem {
     pub node_id: String,
     pub title: String,
-    pub status: Status,
+    /// The status id, its semantic category, and its display name — resolved at
+    /// generation time so the markdown is stable even if statuses are renamed
+    /// later (the report is a snapshot, not a live view).
+    pub status: String,
+    pub status_category: StatusCategory,
+    pub status_name: String,
     pub bucket: Bucket,
     pub tags: Vec<String>,
     /// Nesting inside this section, rebased so the shallowest item sits at 0.
@@ -243,6 +248,14 @@ impl<S: Store> Engine<S> {
         let events = self.events_between(options.from_ms, options.to_ms)?;
         let slipped = self.carry_over_counts()?;
         let last_touch = self.last_event_ms()?;
+        // Names resolved once: renaming a status later must not rewrite what an
+        // already-generated report said.
+        let status_names: Vec<(String, String)> = self
+            .list_statuses()?
+            .into_iter()
+            .map(|s| (s.id, s.name))
+            .collect();
+        let default_open = self.default_open_status_id()?;
 
         // -- 1-3: resolve events to snapshots and bucket them -----------------
         let mut touches: Vec<(String, Touch)> = Vec::new();
@@ -275,7 +288,7 @@ impl<S: Store> Engine<S> {
             let Some(bucket) = touch.bucket() else {
                 continue;
             };
-            items.push(item_from(node, bucket, touch, &slipped));
+            items.push(item_from(node, bucket, touch, &slipped, &status_names));
         }
 
         // -- carried over: open, untouched in range, still in scope -----------
@@ -284,7 +297,7 @@ impl<S: Store> Engine<S> {
             if touches.iter().any(|(id, _)| id == &node.id) {
                 continue;
             }
-            if !is_open(node.status) {
+            if !is_open(node.status_category) {
                 continue;
             }
             let due_in_play = node.due_at.is_some_and(|due| due < options.to_ms);
@@ -304,6 +317,7 @@ impl<S: Store> Engine<S> {
                 Bucket::CarriedOver,
                 &Touch::default(),
                 &slipped,
+                &status_names,
             ));
         }
 
@@ -329,7 +343,14 @@ impl<S: Store> Engine<S> {
         let (sections, duplicated) = self.group(&items, &nodes, options)?;
 
         let title = format!("EOD — {}", options.date_label);
-        let markdown = render(&title, &sections, &counts, duplicated, options);
+        let markdown = render(
+            &title,
+            &sections,
+            &counts,
+            duplicated,
+            options,
+            &default_open,
+        );
 
         Ok(Report {
             title,
@@ -506,8 +527,8 @@ impl<S: Store> Engine<S> {
     }
 }
 
-fn is_open(status: Status) -> bool {
-    !matches!(status, Status::Done | Status::Dropped)
+fn is_open(category: StatusCategory) -> bool {
+    category == StatusCategory::Open
 }
 
 fn item_from(
@@ -515,11 +536,20 @@ fn item_from(
     bucket: Bucket,
     touch: &Touch,
     slipped: &[(String, i64)],
+    status_names: &[(String, String)],
 ) -> ReportItem {
     ReportItem {
         node_id: node.id.clone(),
         title: node.title.clone(),
-        status: node.status,
+        status: node.status.clone(),
+        status_category: node.status_category,
+        // Falls back to the id itself — readable enough for a status that was
+        // deleted while nodes still carried it.
+        status_name: status_names
+            .iter()
+            .find(|(id, _)| id == &node.status)
+            .map(|(_, name)| name.clone())
+            .unwrap_or_else(|| node.status.clone()),
         bucket,
         tags: node.tags.iter().map(|t| t.name.clone()).collect(),
         depth: 0,
@@ -589,6 +619,7 @@ fn render(
     counts: &ReportCounts,
     duplicated: bool,
     options: &ReportOptions,
+    default_open: &str,
 ) -> String {
     let mut out = format!("# {title}\n");
 
@@ -608,7 +639,7 @@ fn render(
             out.push('\n');
         }
         for item in &section.items {
-            out.push_str(&render_item(item, options));
+            out.push_str(&render_item(item, options, default_open));
         }
     }
 
@@ -624,9 +655,9 @@ fn render(
     out
 }
 
-fn render_item(item: &ReportItem, options: &ReportOptions) -> String {
+fn render_item(item: &ReportItem, options: &ReportOptions, options_default_open: &str) -> String {
     let indent = "  ".repeat(item.depth);
-    let box_mark = if item.status == Status::Done {
+    let box_mark = if item.status_category == StatusCategory::Done {
         "x"
     } else {
         " "
@@ -671,10 +702,13 @@ fn render_item(item: &ReportItem, options: &ReportOptions) -> String {
         } else {
             line.push_str(" — _carried over_");
         }
-    } else if item.bucket != Bucket::Completed && item.status == Status::InProgress {
-        line.push_str(" _in progress_");
-    } else if item.status == Status::Blocked {
-        line.push_str(" _blocked_");
+    } else if item.bucket != Bucket::Completed
+        && item.status_category != StatusCategory::Done
+        && item.status != options_default_open
+    {
+        // Any non-default status is worth a word — that is what the user made
+        // it for. The *name* renders, lowercased, so "Waiting" reads as prose.
+        line.push_str(&format!(" _{}_", item.status_name.to_lowercase()));
     }
 
     line.push('\n');

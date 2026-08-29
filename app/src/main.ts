@@ -19,6 +19,7 @@ import {
   type NodeView,
   type ReportItem,
   type Status,
+  type StatusCategory,
 } from "./core/engine-port";
 import {
   dueDayValue,
@@ -74,20 +75,6 @@ const QUERY_DEBOUNCE_MS = 120;
 /** Where the sidebar's collapsed state is remembered between sessions. */
 const SIDEBAR_KEY = "daybook.sidebarCollapsed";
 
-/**
- * The statuses the detail rail offers.
- *
- * `inbox` is deliberately absent: it is the state a node is born in and means
- * "not yet triaged", so offering it as a destination would let you un-triage
- * something, which is not a thing anyone wants to say.
- */
-const STATUSES: Array<{ value: Status; label: string; color: string }> = [
-  { value: "todo", label: "Todo", color: "var(--muted-foreground)" },
-  { value: "in_progress", label: "In progress", color: "var(--warning)" },
-  { value: "blocked", label: "Blocked", color: "var(--destructive)" },
-  { value: "done", label: "Done", color: "var(--success)" },
-  { value: "dropped", label: "Dropped", color: "var(--muted-foreground)" },
-];
 
 interface AppComponent {
   state: ListState;
@@ -181,8 +168,19 @@ interface AppComponent {
   dismissToast(): void;
   // The meta rail edits the *detail* node; `t` and `c` still act on the focused
   // sub-item, so these cannot share the overlay handlers.
-  STATUSES: typeof STATUSES;
   setStatus(status: Status): void;
+  statusColor(hue: string): string;
+  /** The status `x` reopens to — it renders quiet, everywhere. */
+  defaultOpenStatusId(): string | null;
+  // -- statuses editor
+  openStatusEditor(): void;
+  newStatusDraft: string;
+  newStatusCategory: StatusCategory;
+  submitNewStatus(): void;
+  renameStatusTo(id: string, name: string): void;
+  cycleStatusColor(id: string): void;
+  removeStatus(id: string): void;
+  cycleTagColor(tagId: string, event: Event): void;
   detailInCollection(collectionId: string): boolean;
   toggleDetailCollection(collectionId: string): void;
   detailTagDraft: string;
@@ -338,6 +336,8 @@ Alpine.data("daybook", (): AppComponent => {
       searchOpen: false,
       allTags: [],
       allCollections: [],
+      allStatuses: [],
+      statusEditorOpen: false,
       detailId: null,
       report: null,
       reportDay: "",
@@ -370,6 +370,8 @@ Alpine.data("daybook", (): AppComponent => {
     collectionsById: new Map(),
     newCollectionOpen: false,
     newCollectionDraft: "",
+    newStatusDraft: "",
+    newStatusCategory: "open" as StatusCategory,
 
     init() {
       controller = new ListController(port, {
@@ -529,18 +531,13 @@ Alpine.data("daybook", (): AppComponent => {
       void controller.dispatch(node.collapsed ? "expand-or-child" : "collapse-or-parent");
     },
     statusDot(node) {
-      // Only the states the checkbox cannot express. `inbox` is the default a
-      // node is born in and means nothing yet, so it stays quiet too.
-      switch (node.status) {
-        case "in_progress":
-          return { color: "var(--warning)", label: "In progress" };
-        case "blocked":
-          return { color: "var(--destructive)", label: "Blocked" };
-        case "dropped":
-          return { color: "var(--muted-foreground)", label: "Dropped" };
-        default:
-          return null;
-      }
+      // Only what the checkbox cannot express: the default open status and any
+      // done-category status stay quiet, everything else shows its own colour.
+      if (node.statusCategory === "done") return null;
+      if (node.status === this.defaultOpenStatusId()) return null;
+      const status = this.state.allStatuses.find((s) => s.id === node.status);
+      if (!status) return null;
+      return { color: this.statusColor(status.color), label: status.name };
     },
     childCount(node) {
       // Tolerates null: `x-show` gates *rendering*, not evaluation, so the
@@ -785,7 +782,7 @@ Alpine.data("daybook", (): AppComponent => {
       return this.state.reportDay === localDayKey(new Date());
     },
     reportItemClasses(item) {
-      if (item.status === "done") return "line-through opacity-55";
+      if (item.statusCategory === "done") return "line-through opacity-55";
       if (item.bucket === "carried_over") return "text-muted-foreground";
       return "";
     },
@@ -796,16 +793,54 @@ Alpine.data("daybook", (): AppComponent => {
           : "carried over";
       }
       if (item.promotedInRange) return "promoted today ↑";
-      if (item.status === "in_progress") return "in progress";
-      if (item.status === "blocked") return "blocked";
+      // Any non-default status earns its name in prose — that is what the user
+      // made it for.
+      if (item.statusCategory !== "done" && item.status !== this.defaultOpenStatusId()) {
+        return item.statusName.toLowerCase();
+      }
       return "";
     },
 
     // -- detail meta rail ----------------------------------------------------
 
-    STATUSES,
     setStatus(status) {
       if (this.detail) void controller.setStatus(this.detail.id, status);
+    },
+    statusColor(hue) {
+      return HUES[hue] ?? "var(--muted-foreground)";
+    },
+    defaultOpenStatusId() {
+      return this.state.allStatuses.find((s) => s.category === "open")?.id ?? null;
+    },
+
+    // -- statuses editor -----------------------------------------------------
+
+    openStatusEditor() {
+      controller.openStatusEditor();
+    },
+    submitNewStatus() {
+      const name = this.newStatusDraft.trim();
+      if (!name) return;
+      this.newStatusDraft = "";
+      void controller.createStatus(name, this.newStatusCategory);
+    },
+    renameStatusTo(id, name) {
+      const trimmed = name.trim();
+      const current = this.state.allStatuses.find((s) => s.id === id);
+      if (!trimmed || !current || current.name === trimmed) return;
+      void controller.renameStatus(id, trimmed);
+    },
+    cycleStatusColor(id) {
+      void controller.cycleStatusColor(id);
+    },
+    removeStatus(id) {
+      void controller.deleteStatus(id);
+    },
+    cycleTagColor(tagId, event) {
+      // Inside the tag overlay the chip's main click removes the tag; the dot
+      // is its own smaller target and must not bubble into that.
+      event.stopPropagation();
+      void controller.cycleTagColor(tagId);
     },
     detailInCollection(collectionId) {
       return this.detail?.collectionIds.includes(collectionId) ?? false;

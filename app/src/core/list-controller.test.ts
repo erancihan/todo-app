@@ -8,13 +8,17 @@ import type { EnginePort, NodeView } from "./engine-port";
  * itself is tested in Rust; what is under test here is the glue.
  */
 function node(partial: Partial<NodeView> & { id: string }): NodeView {
+  const status = partial.status ?? "todo";
   return {
     parentId: null,
     kind: "task",
     promoted: false,
     title: partial.id,
     bodyMd: "",
-    status: "todo",
+    status,
+    // Derived from the built-in ids the way the engine resolves them, so tests
+    // written against the old enum keep meaning what they meant.
+    statusCategory: status === "done" ? "done" : status === "dropped" ? "cancelled" : "open",
     orderKey: partial.id,
     createdAt: 0,
     updatedAt: 0,
@@ -55,6 +59,16 @@ function fakeEngine(tree: NodeView[]): EnginePort {
     listTags: () => Promise.resolve([]),
     createCollection: vi.fn(),
     listCollections: () => Promise.resolve([]),
+    listStatuses: () =>
+      Promise.resolve([
+        { id: "todo", name: "Todo", category: "open", color: "", sort: 0, builtIn: true },
+        { id: "done", name: "Done", category: "done", color: "emerald", sort: 4, builtIn: true },
+      ]),
+    createStatus: vi.fn(),
+    renameStatus: vi.fn(stub),
+    setStatusColor: vi.fn(stub),
+    deleteStatus: vi.fn(stub),
+    setTagColor: vi.fn(stub),
     addToCollection: vi.fn(stub),
     removeFromCollection: vi.fn(stub),
     eventsBetween: () => Promise.resolve([]),

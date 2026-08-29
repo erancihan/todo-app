@@ -434,6 +434,35 @@ try {
   await page.keyboard.press("Escape");
   await page.waitForTimeout(900);
 
+  // --- user-defined statuses ----------------------------------------------
+  // The vocabulary is data now. This drives the wasm boundary: create a custom
+  // status, see it come back typed, apply it, and confirm `x` still finishes a
+  // task by category rather than by the id "done".
+  const statusRoundTrip = await page.evaluate(async () => {
+    const mod = await import("/src/core/engine-port.ts");
+    const port = mod.engine();
+    const made = await port.createStatus("Errand", "open", null);
+    const listed = await port.listStatuses();
+    const node = await port.createNode(null, "Pick up the parcel", null);
+    await port.setStatus(node.id, made.id);
+    const applied = await port.node(node.id);
+    await port.toggleDone(node.id);
+    const finished = await port.node(node.id);
+    await port.deleteNode(node.id);
+    await port.deleteStatus(made.id);
+    return {
+      created: made.category === "open" && made.id.length > 10,
+      listed: listed.some((s) => s.name === "Errand"),
+      applied: applied.status === made.id && applied.statusCategory === "open",
+      finished: finished.statusCategory === "done",
+    };
+  });
+  check(
+    "a custom status round-trips the wasm boundary and x completes by category",
+    Object.values(statusRoundTrip).every(Boolean),
+    JSON.stringify(statusRoundTrip),
+  );
+
   // --- link chips ---------------------------------------------------------
   // A ticket URL in a body renders as a short reference chip, not a wall of
   // URL — Daybook points at trackers, it does not become one.

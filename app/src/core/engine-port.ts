@@ -27,7 +27,24 @@ import {
 } from "./tab-lease";
 
 export type Kind = "task" | "checklist_item";
-export type Status = "inbox" | "todo" | "in_progress" | "blocked" | "done" | "dropped";
+
+/**
+ * A status id. Statuses are user-defined rows now, so this is an opaque string —
+ * the built-ins keep the old enum values ("todo", "done", …) as their ids.
+ */
+export type Status = string;
+
+/** The engine-meaningful part of a status; everything else is presentation. */
+export type StatusCategory = "open" | "done" | "cancelled";
+
+export interface StatusView {
+  id: string;
+  name: string;
+  category: StatusCategory;
+  color: string;
+  sort: number;
+  builtIn: boolean;
+}
 
 export interface TagView {
   id: string;
@@ -43,6 +60,8 @@ export interface NodeView {
   title: string;
   bodyMd: string;
   status: Status;
+  /** Resolved by the engine so the UI never joins the status table itself. */
+  statusCategory: StatusCategory;
   orderKey: string;
   createdAt: number;
   updatedAt: number;
@@ -91,6 +110,8 @@ export interface ReportItem {
   nodeId: string;
   title: string;
   status: Status;
+  statusCategory: StatusCategory;
+  statusName: string;
   bucket: Bucket;
   tags: string[];
   depth: number;
@@ -157,6 +178,12 @@ export interface EnginePort {
   setTitle(id: string, title: string): Promise<void>;
   setBody(id: string, markdown: string): Promise<void>;
   setStatus(id: string, status: Status): Promise<void>;
+  listStatuses(): Promise<StatusView[]>;
+  createStatus(name: string, category: StatusCategory, color: string | null): Promise<StatusView>;
+  renameStatus(id: string, name: string): Promise<void>;
+  setStatusColor(id: string, color: string): Promise<void>;
+  deleteStatus(id: string): Promise<void>;
+  setTagColor(tagId: string, color: string): Promise<void>;
   /** `null` clears the due date. Milliseconds, UTC. */
   setDue(id: string, dueMs: number | null): Promise<void>;
   toggleDone(id: string): Promise<void>;
@@ -236,6 +263,24 @@ class TauriEnginePort implements EnginePort {
   }
   setStatus(id: string, status: Status) {
     return this.invoke<void>("set_status", { id, status });
+  }
+  listStatuses() {
+    return this.invoke<StatusView[]>("list_statuses");
+  }
+  createStatus(name: string, category: StatusCategory, color: string | null) {
+    return this.invoke<StatusView>("create_status", { name, category, color });
+  }
+  renameStatus(id: string, name: string) {
+    return this.invoke<void>("rename_status", { id, name });
+  }
+  setStatusColor(id: string, color: string) {
+    return this.invoke<void>("set_status_color", { id, color });
+  }
+  deleteStatus(id: string) {
+    return this.invoke<void>("delete_status", { id });
+  }
+  setTagColor(tagId: string, color: string) {
+    return this.invoke<void>("set_tag_color", { tagId, color });
   }
   setDue(id: string, dueMs: number | null) {
     return this.invoke<void>("set_due", { id, dueMs });
@@ -326,6 +371,7 @@ const READ_ONLY = new Set([
   "node",
   "listTags",
   "listCollections",
+  "listStatuses",
   "eventsBetween",
   "eventsForNode",
   "generateReport",
@@ -529,6 +575,24 @@ class WasmEnginePort implements EnginePort {
   }
   setStatus(id: string, status: Status) {
     return this.call<void>("setStatus", id, status);
+  }
+  listStatuses() {
+    return this.call<StatusView[]>("listStatuses");
+  }
+  createStatus(name: string, category: StatusCategory, color: string | null) {
+    return this.call<StatusView>("createStatus", name, category, color ?? undefined);
+  }
+  renameStatus(id: string, name: string) {
+    return this.call<void>("renameStatus", id, name);
+  }
+  setStatusColor(id: string, color: string) {
+    return this.call<void>("setStatusColor", id, color);
+  }
+  deleteStatus(id: string) {
+    return this.call<void>("deleteStatus", id);
+  }
+  setTagColor(tagId: string, color: string) {
+    return this.call<void>("setTagColor", tagId, color);
   }
   setDue(id: string, dueMs: number | null) {
     return this.call<void>("setDue", id, dueMs ?? undefined);
