@@ -23,6 +23,7 @@ import type {
   StatusView,
   TagView,
 } from "./engine-port";
+import { parseRepeatToken } from "./date-token";
 import { fromEvent, resolveKey, shouldPreventDefault, type Action, type Mode } from "./keymap";
 
 /**
@@ -995,13 +996,7 @@ export class ListController {
       // -- verbs
       case "toggle-done":
         if (!node) return;
-        this.remember({
-          label: "toggle done",
-          focusId: node.id,
-          undo: () => this.engine.toggleDone(node.id),
-          redo: () => this.engine.toggleDone(node.id),
-        });
-        return this.run(() => this.engine.toggleDone(node.id));
+        return this.toggleDone(node.id);
       case "promote":
         if (!node) return;
         if (node.promoted) return;
@@ -1213,24 +1208,121 @@ export class ListController {
   }
 
   /**
+   * `x` — and the reason completion is not a plain `remember`-then-`run`:
+   * finishing a repeating todo spawns its next occurrence inside the engine's
+   * transaction, and undo must erase that spawn and hand the rule back, or an
+   * undone completion leaves a phantom "next time" behind. The spawn id is
+   * only known after the call, so the step is recorded after it succeeds; the
+   * box lets redo re-capture the id of the fresh spawn it mints.
+   */
+  async toggleDone(id: string): Promise<void> {
+    const node = this.state.nodes.find((n) => n.id === id);
+    if (!node) return;
+    const today = localDayKey(new Date());
+    const rule = node.repeatRule;
+    let spawned: NodeView | null = null;
+    let ok = false;
+    await this.run(async () => {
+      spawned = await this.engine.toggleDone(id, today);
+      ok = true;
+    });
+    if (!ok) return;
+    const box = { spawnId: (spawned as NodeView | null)?.id ?? null };
+    this.remember({
+      label: "toggle done",
+      focusId: id,
+      undo: async () => {
+        await this.engine.toggleDone(id, today);
+        if (box.spawnId) {
+          await this.engine.deleteNode(box.spawnId);
+          if (rule) await this.engine.setRepeat(id, rule);
+        }
+      },
+      redo: async () => {
+        const again = await this.engine.toggleDone(id, today);
+        box.spawnId = again?.id ?? null;
+      },
+    });
+  }
+
+  /**
    * Set an explicit status.
    *
    * `x` only ever swings between `todo` and `done`, so until the detail view's
    * meta rail there was no way to reach `in_progress`, `blocked` or `dropped`
    * from the UI at all — the engine supported them and nothing offered them.
+   * Spawn handling matches `toggleDone`: a done-category status completes.
    */
   async setStatus(id: string, status: Status): Promise<void> {
     const node = this.state.nodes.find((n) => n.id === id);
     const previous = node?.status;
-    if (previous && previous !== status) {
-      this.remember({
-        label: "status",
-        focusId: id,
-        undo: () => this.engine.setStatus(id, previous),
-        redo: () => this.engine.setStatus(id, status),
-      });
-    }
-    return this.run(() => this.engine.setStatus(id, status));
+    const rule = node?.repeatRule ?? null;
+    const today = localDayKey(new Date());
+    let spawned: NodeView | null = null;
+    let ok = false;
+    await this.run(async () => {
+      spawned = await this.engine.setStatus(id, status, today);
+      ok = true;
+    });
+    if (!ok || !previous || previous === status) return;
+    const box = { spawnId: (spawned as NodeView | null)?.id ?? null };
+    this.remember({
+      label: "status",
+      focusId: id,
+      undo: async () => {
+        await this.engine.setStatus(id, previous, today);
+        if (box.spawnId) {
+          await this.engine.deleteNode(box.spawnId);
+          if (rule) await this.engine.setRepeat(id, rule);
+        }
+      },
+      redo: async () => {
+        const again = await this.engine.setStatus(id, status, today);
+        box.spawnId = again?.id ?? null;
+      },
+    });
+  }
+
+  /** The detail rail's repeat field. The engine validates and canonicalizes. */
+  async setRepeatRule(id: string, rule: string | null): Promise<void> {
+    const node = this.state.nodes.find((n) => n.id === id);
+    if (!node || (node.repeatRule ?? null) === rule) return;
+    const previous = node.repeatRule;
+    this.remember({
+      label: "repeat",
+      focusId: id,
+      undo: () => this.engine.setRepeat(id, previous),
+      redo: () => this.engine.setRepeat(id, rule),
+    });
+    return this.run(() => this.engine.setRepeat(id, rule));
+  }
+
+  /**
+   * The `!every` token: adopt the rule *and* plan its first occurrence, as one
+   * undoable step — accepting a token is one gesture, so undoing it is too.
+   */
+  async applyRepeatRule(id: string, rule: string): Promise<void> {
+    const node = this.state.nodes.find((n) => n.id === id);
+    if (!node) return;
+    const first = parseRepeatToken(rule)?.firstDay ?? null;
+    const prevRule = node.repeatRule;
+    const prevDay = node.scheduledFor;
+    this.remember({
+      label: "repeat",
+      focusId: id,
+      undo: async () => {
+        await this.engine.setRepeat(id, prevRule);
+        if (first) await this.engine.setScheduled(id, prevDay);
+      },
+      redo: async () => {
+        await this.engine.setRepeat(id, rule);
+        if (first) await this.engine.setScheduled(id, first);
+      },
+    });
+    return this.run(async () => {
+      await this.engine.setRepeat(id, rule);
+      if (first) await this.engine.setScheduled(id, first);
+    });
   }
 
   async addTag(id: string, name: string): Promise<void> {

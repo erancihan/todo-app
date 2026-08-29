@@ -8,7 +8,12 @@
 
 import { describe, expect, it } from "vitest";
 
-import { DAY_SUGGESTIONS, parseDayToken } from "./date-token";
+import {
+  DAY_SUGGESTIONS,
+  parseDayToken,
+  parseRepeatToken,
+  REPEAT_SUGGESTIONS,
+} from "./date-token";
 
 /** Wednesday. Chosen mid-week so "before" and "after" weekdays both exist. */
 const NOW = new Date(2026, 0, 14, 10, 30);
@@ -110,6 +115,45 @@ describe("the ! date grammar", () => {
   it("can parse every one of its own menu suggestions", () => {
     for (const suggestion of DAY_SUGGESTIONS) {
       expect(parseDayToken(suggestion, NOW), suggestion).not.toBeNull();
+    }
+  });
+});
+
+describe("the !every repeat grammar (TS mirror)", () => {
+  it("canonicalizes exactly like the engine", () => {
+    expect(parseRepeatToken("daily", NOW)?.rule).toBe("every day");
+    expect(parseRepeatToken("Every  MON", NOW)?.rule).toBe("every monday");
+    expect(parseRepeatToken("every 2 weeks", NOW)?.rule).toBe("every 2 weeks");
+    expect(parseRepeatToken("annually", NOW)?.rule).toBe("every year");
+    expect(parseRepeatToken("every weekday", NOW)?.rule).toBe("every weekday");
+  });
+
+  it("plans interval rules to start today", () => {
+    expect(parseRepeatToken("every day", NOW)?.firstDay).toBe("2026-01-14");
+    expect(parseRepeatToken("every 3 months", NOW)?.firstDay).toBe("2026-01-14");
+  });
+
+  it("plans weekday rules on the coming matching day, today included", () => {
+    // NOW is a Wednesday.
+    expect(parseRepeatToken("every wednesday", NOW)?.firstDay).toBe("2026-01-14");
+    expect(parseRepeatToken("every monday", NOW)?.firstDay).toBe("2026-01-19");
+  });
+
+  it("plans every-weekday off a weekend onto Monday", () => {
+    const saturday = new Date(2026, 0, 17);
+    expect(parseRepeatToken("every weekday", saturday)?.firstDay).toBe("2026-01-19");
+    expect(parseRepeatToken("every weekday", NOW)?.firstDay).toBe("2026-01-14");
+  });
+
+  it("rejects everything outside the grammar", () => {
+    for (const bad of ["", "every", "every 0 days", "every mondays", "sometimes", "every other day"]) {
+      expect(parseRepeatToken(bad, NOW), bad).toBeNull();
+    }
+  });
+
+  it("can parse every one of its own menu suggestions", () => {
+    for (const suggestion of REPEAT_SUGGESTIONS) {
+      expect(parseRepeatToken(suggestion, NOW), suggestion).not.toBeNull();
     }
   });
 });

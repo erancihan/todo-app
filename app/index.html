@@ -248,15 +248,15 @@
               <button
                 type="button"
                 class="mt-[7px] size-[16px] shrink-0 rounded-[4px] border"
-                :style="detail?.status === 'done'
+                :style="detail?.statusCategory === 'done'
                   ? 'background: var(--success); border-color: var(--success)'
                   : 'border-color: color-mix(in oklch, var(--muted-foreground) 55%, transparent)'"
-                :aria-label="detail?.status === 'done' ? 'Mark not done' : 'Mark done'"
+                :aria-label="detail?.statusCategory === 'done' ? 'Mark not done' : 'Mark done'"
                 @click="toggleDone(detail, $event)"
               ></button>
               <h2
                 class="text-[1.375rem] leading-[1.3] font-[590] tracking-[-0.02em]"
-                :class="detail?.status === 'done' ? 'line-through opacity-55' : (detail?.title ? '' : 'text-muted-foreground italic')"
+                :class="detail?.statusCategory === 'done' ? 'line-through opacity-55' : (detail?.title ? '' : 'text-muted-foreground italic')"
                 x-text="detail?.title || 'Untitled'"
               ></h2>
             </div>
@@ -378,12 +378,12 @@
                   <button
                     type="button"
                     role="checkbox"
-                    :aria-checked="node.status === 'done'"
+                    :aria-checked="node.statusCategory === 'done'"
                     class="mt-[3px] size-[14px] shrink-0 rounded-[3px] border"
-                    :style="node.status === 'done'
+                    :style="node.statusCategory === 'done'
                       ? 'background: var(--success); border-color: var(--success)'
                       : 'border-color: color-mix(in oklch, var(--muted-foreground) 55%, transparent)'"
-                    :aria-label="node.status === 'done' ? 'Mark not done' : 'Mark done'"
+                    :aria-label="node.statusCategory === 'done' ? 'Mark not done' : 'Mark done'"
                     @click="toggleDone(node, $event)"
                   ></button>
 
@@ -404,11 +404,20 @@
                            with the markdown stripped — never rendered raw here. -->
                       <span
                         class="truncate text-[0.8125rem]"
-                        :class="node.status === 'done'
+                        :class="node.statusCategory === 'done'
                           ? 'line-through opacity-55'
                           : (node.title ? '' : 'text-muted-foreground italic')"
                         x-text="node.title || 'Untitled'"
                       ></span>
+
+                      <!-- The quiet mark that this todo comes back. -->
+                      <span
+                        x-show="node.repeatRule"
+                        x-cloak
+                        class="shrink-0 font-mono text-[0.6875rem] text-muted-foreground"
+                        :title="'Repeats ' + node.repeatRule"
+                        >↻</span
+                      >
 
                       <!-- A promoted sub-item keeps its place but gains a marker,
                            and that marker IS the detail affordance docs/04 §6
@@ -584,6 +593,34 @@
                     x-cloak
                     class="mt-1 text-[0.6875rem] text-muted-foreground hover:text-foreground"
                     @click="setDetailScheduled('')"
+                  >
+                    Clear
+                  </button>
+                </div>
+
+                <div>
+                  <h3 class="mb-1.5 text-[0.6875rem] font-[590] tracking-[0.06em] text-muted-foreground uppercase">
+                    Repeats
+                  </h3>
+                  <!-- Free text against the bounded grammar — "every monday",
+                       "every 2 weeks", "every weekday". The engine validates and
+                       canonicalizes; an invalid rule surfaces as an error toast
+                       and the field snaps back on refresh. -->
+                  <input
+                    type="text"
+                    placeholder="every monday…"
+                    class="w-full rounded-[var(--radius-sm)] border bg-transparent px-1.5 py-1 outline-none placeholder:text-muted-foreground/60"
+                    style="border-color: var(--border)"
+                    :value="detailRepeatValue()"
+                    @change="setDetailRepeat($event.target.value)"
+                    @keydown.enter.stop="$event.target.blur()"
+                  />
+                  <button
+                    type="button"
+                    x-show="detail?.repeatRule"
+                    x-cloak
+                    class="mt-1 text-[0.6875rem] text-muted-foreground hover:text-foreground"
+                    @click="setDetailRepeat('')"
                   >
                     Clear
                   </button>

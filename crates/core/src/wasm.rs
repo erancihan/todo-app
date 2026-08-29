@@ -226,9 +226,30 @@ impl DaybookEngine {
         self.inner.borrow().set_body(&id, &markdown).map_err(err)
     }
 
+    /// `today` is the host's civil day. Returns the spawned next occurrence
+    /// (as a NodeView) when completing a repeating todo, else `null`.
     #[wasm_bindgen(js_name = setStatus)]
-    pub fn set_status(&self, id: String, status: String) -> std::result::Result<(), JsValue> {
-        self.inner.borrow().set_status(&id, &status).map_err(err)
+    pub fn set_status(
+        &self,
+        id: String,
+        status: String,
+        today: String,
+    ) -> std::result::Result<JsValue, JsValue> {
+        to_js(
+            &self
+                .inner
+                .borrow()
+                .set_status(&id, &status, &today)
+                .map_err(err)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = setRepeat)]
+    pub fn set_repeat(&self, id: String, rule: Option<String>) -> std::result::Result<(), JsValue> {
+        self.inner
+            .borrow()
+            .set_repeat(&id, rule.as_deref())
+            .map_err(err)
     }
 
     #[wasm_bindgen(js_name = setScheduled)]
@@ -290,9 +311,10 @@ impl DaybookEngine {
         self.inner.borrow().delete_status(&id).map_err(err)
     }
 
+    /// `today` and the return value: see [`Engine::set_status`].
     #[wasm_bindgen(js_name = toggleDone)]
-    pub fn toggle_done(&self, id: String) -> std::result::Result<(), JsValue> {
-        self.inner.borrow().toggle_done(&id).map_err(err)
+    pub fn toggle_done(&self, id: String, today: String) -> std::result::Result<JsValue, JsValue> {
+        to_js(&self.inner.borrow().toggle_done(&id, &today).map_err(err)?)
     }
 
     pub fn promote(&self, id: String) -> std::result::Result<(), JsValue> {

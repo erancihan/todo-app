@@ -29,6 +29,7 @@ use crate::hlc::{Hlc, HlcClock};
 use crate::ids::{new_id, DeviceId};
 use crate::node::{Kind, StatusCategory, MAX_DEPTH};
 use crate::order_key;
+use crate::repeat;
 use crate::store::{SqlValue, Store, StoreExt};
 use crate::{CoreError, Result};
 
@@ -53,6 +54,8 @@ pub struct NodeView {
     pub due_at: Option<i64>,
     /// The civil day this is planned for, as `YYYY-MM-DD`, or None.
     pub scheduled_for: Option<String>,
+    /// Canonical repeat rule ("every monday"), or None for a one-off.
+    pub repeat_rule: Option<String>,
     pub completed_at: Option<i64>,
     pub collapsed: bool,
     /// Depth in the tree, 0 for a root todo. Derived, not stored.
@@ -92,6 +95,7 @@ pub struct EventView {
     pub to_value: Option<String>,
     pub occurred_at: String,
     pub occurred_ms: i64,
+    pub payload: Option<String>,
 }
 
 /// One user-defined status.
@@ -138,13 +142,47 @@ const HUES: [&str; 8] = [
 /// Columns every node query selects, in a fixed order. One constant so the
 /// `SELECT` and the row decoder can never drift apart.
 const NODE_COLUMNS: &str = "id, parent_id, kind, promoted, title, body_md, status, \
-     order_key, created_at, updated_at, due_at, completed_at, collapsed, scheduled_for";
+     order_key, created_at, updated_at, due_at, completed_at, collapsed, scheduled_for, \
+     repeat_rule";
 
 pub struct Engine<S: Store> {
     store: S,
     account_id: String,
     device: DeviceId,
     clock: RefCell<HlcClock>,
+}
+
+/// The next occurrence of a repeating todo, fully resolved before the
+/// completion transaction opens so the inserts inside it cannot fail on
+/// anything but the store itself.
+struct SpawnPlan {
+    id: String,
+    origin_id: String,
+    parent_id: Option<String>,
+    kind: String,
+    promoted: bool,
+    title: String,
+    body_md: String,
+    body_state: String,
+    status: String,
+    order_key: String,
+    scheduled_for: String,
+    rule: String,
+}
+
+/// `YYYY-MM-DD` by shape. Calendar validity is the repeat module's business;
+/// this guards the columns against garbage like timestamps or prose.
+fn validate_day(d: &str) -> Result<()> {
+    let ok = d.len() == 10
+        && d.bytes().enumerate().all(|(i, b)| match i {
+            4 | 7 => b == b'-',
+            _ => b.is_ascii_digit(),
+        });
+    if ok {
+        Ok(())
+    } else {
+        Err(CoreError::Store(format!("not a YYYY-MM-DD day: {d}")))
+    }
 }
 
 impl<S: Store> Engine<S> {
@@ -170,7 +208,10 @@ impl<S: Store> Engine<S> {
     /// and probing PRAGMA table_info first would just be a slower spelling of
     /// the same idempotency.
     fn migrate(&self) -> Result<()> {
-        for alter in ["ALTER TABLE node ADD COLUMN scheduled_for TEXT"] {
+        for alter in [
+            "ALTER TABLE node ADD COLUMN scheduled_for TEXT",
+            "ALTER TABLE node ADD COLUMN repeat_rule TEXT",
+        ] {
             if let Err(e) = self.store.execute(alter, &[]) {
                 let text = e.to_string();
                 if !text.contains("duplicate column") {
@@ -740,14 +781,7 @@ impl<S: Store> Engine<S> {
     /// viewer's calendar.
     pub fn set_scheduled(&self, id: &str, day: Option<&str>) -> Result<()> {
         if let Some(d) = day {
-            let ok = d.len() == 10
-                && d.bytes().enumerate().all(|(i, b)| match i {
-                    4 | 7 => b == b'-',
-                    _ => b.is_ascii_digit(),
-                });
-            if !ok {
-                return Err(CoreError::Store(format!("not a YYYY-MM-DD day: {d}")));
-            }
+            validate_day(d)?;
         }
         let at = self.stamp();
         let previous = self.node(id)?.and_then(|n| n.scheduled_for);
@@ -878,13 +912,25 @@ impl<S: Store> Engine<S> {
         hash & ((1u64 << 53) - 1)
     }
 
-    pub fn set_status(&self, id: &str, status_id: &str) -> Result<()> {
+    /// Set an explicit status.
+    ///
+    /// `today` is the viewer's civil day, resolved by the host — the same
+    /// division of labour as [`Engine::set_scheduled`]. It exists because
+    /// completing a **repeating** todo spawns its next occurrence here, in the
+    /// same transaction as the completion, and "the next Monday" cannot be
+    /// answered without knowing which day the user is living in.
+    ///
+    /// Returns the spawned occurrence when one was created, so the caller can
+    /// make undo erase it — an undone completion must not leave a phantom
+    /// "next time" behind.
+    pub fn set_status(&self, id: &str, status_id: &str, today: &str) -> Result<Option<NodeView>> {
+        validate_day(today)?;
         let at = self.stamp();
         let Some(node) = self.node(id)? else {
             return Err(CoreError::Store(format!("no such node: {id}")));
         };
         if node.status == status_id {
-            return Ok(());
+            return Ok(None);
         }
         let statuses = self.status_categories()?;
         let Some(&category) = statuses.get(status_id) else {
@@ -895,6 +941,28 @@ impl<S: Store> Engine<S> {
 
         let now = at.wall_ms as i64;
         let completed_at: SqlValue = if is_done { now.into() } else { SqlValue::Null };
+
+        // Three distinct event types, because the report reads them
+        // differently: `completed` is an accomplishment, `reopened` undoes
+        // one, and a move between open states is just progress. Category,
+        // not id, decides which — renaming "Done" must not change what
+        // finishing a task means.
+        let kind = if is_done && !was_done {
+            EventType::Completed
+        } else if was_done && !is_done {
+            EventType::Reopened
+        } else {
+            EventType::StatusChanged
+        };
+
+        // Only genuine completion continues a chain. Dropping an occurrence
+        // (cancelled category) ends it — that is how a repeating task is
+        // stopped without deleting its history.
+        let spawn = if kind == EventType::Completed {
+            self.plan_spawn(&node, today)?
+        } else {
+            None
+        };
 
         self.store.transaction(|| {
             self.store.execute(
@@ -907,25 +975,23 @@ impl<S: Store> Engine<S> {
                 ],
             )?;
             self.touch(id, &at)?;
+            self.emit(&at, id, kind, Some(&node.status), Some(status_id), None)?;
+            if let Some(plan) = &spawn {
+                self.insert_spawn(plan, &at)?;
+            }
+            Ok(())
+        })?;
 
-            // Three distinct event types, because the report reads them
-            // differently: `completed` is an accomplishment, `reopened` undoes
-            // one, and a move between open states is just progress. Category,
-            // not id, decides which — renaming "Done" must not change what
-            // finishing a task means.
-            let kind = if is_done && !was_done {
-                EventType::Completed
-            } else if was_done && !is_done {
-                EventType::Reopened
-            } else {
-                EventType::StatusChanged
-            };
-            self.emit(&at, id, kind, Some(&node.status), Some(status_id), None)
-        })
+        match spawn {
+            Some(plan) => self.node(&plan.id),
+            None => Ok(None),
+        }
     }
 
     /// `x` — flip between the default done and default open status.
-    pub fn toggle_done(&self, id: &str) -> Result<()> {
+    ///
+    /// `today` and the return value: see [`Engine::set_status`].
+    pub fn toggle_done(&self, id: &str, today: &str) -> Result<Option<NodeView>> {
         let Some(node) = self.node(id)? else {
             return Err(CoreError::Store(format!("no such node: {id}")));
         };
@@ -934,7 +1000,155 @@ impl<S: Store> Engine<S> {
         } else {
             self.default_status(StatusCategory::Done)?
         };
-        self.set_status(id, &target)
+        self.set_status(id, &target, today)
+    }
+
+    /// Set or clear the repeat rule, stored in the grammar's canonical spelling.
+    pub fn set_repeat(&self, id: &str, rule: Option<&str>) -> Result<()> {
+        let canonical = match rule {
+            None => None,
+            Some(text) => {
+                let parsed = repeat::parse(text)
+                    .ok_or_else(|| CoreError::Store(format!("not a repeat rule: {text}")))?;
+                Some(repeat::canonical(parsed))
+            }
+        };
+        let at = self.stamp();
+        let Some(node) = self.node(id)? else {
+            return Err(CoreError::Store(format!("no such node: {id}")));
+        };
+        if node.repeat_rule == canonical {
+            return Ok(());
+        }
+        self.store.transaction(|| {
+            self.store.execute(
+                "UPDATE node SET repeat_rule = ? WHERE account_id = ? AND id = ?",
+                &[canonical.clone().into(), self.account(), id.into()],
+            )?;
+            self.touch(id, &at)?;
+            self.emit(
+                &at,
+                id,
+                EventType::Updated,
+                node.repeat_rule.as_deref(),
+                canonical.as_deref(),
+                Some("repeat"),
+            )
+        })
+    }
+
+    /// Everything the next occurrence needs, computed before the completion
+    /// transaction opens. `None` when the node does not repeat — or when its
+    /// stored rule no longer parses, in which case completing must still work
+    /// and the chain simply ends rather than blocking the user.
+    fn plan_spawn(&self, node: &NodeView, today: &str) -> Result<Option<SpawnPlan>> {
+        let Some(rule_text) = node.repeat_rule.as_deref() else {
+            return Ok(None);
+        };
+        let Some(rule) = repeat::parse(rule_text) else {
+            return Ok(None);
+        };
+        let anchor = node.scheduled_for.as_deref().unwrap_or(today);
+        let Some(next_day) = repeat::next_after(rule, anchor, today) else {
+            return Ok(None);
+        };
+
+        // A fresh Y.Text seeded with the origin's text, exactly as
+        // `duplicate_node` reasons: clean minimal history, not inherited edits.
+        let body_state = if node.body_md.is_empty() {
+            String::new()
+        } else {
+            let mut body = load_body("", self.body_client_id())?;
+            apply_text_change(&mut body, &node.body_md)?;
+            b64::encode(body.snapshot()?.as_bytes())
+        };
+
+        Ok(Some(SpawnPlan {
+            id: new_id().to_string(),
+            origin_id: node.id.clone(),
+            parent_id: node.parent_id.clone(),
+            kind: node.kind.as_str().to_owned(),
+            promoted: node.promoted,
+            title: node.title.clone(),
+            body_md: node.body_md.clone(),
+            body_state,
+            status: self.default_status(StatusCategory::Open)?,
+            order_key: self.order_key_between(node.parent_id.as_deref(), Some(&node.id))?,
+            scheduled_for: next_day,
+            rule: repeat::canonical(rule),
+        }))
+    }
+
+    /// Insert the next occurrence. Called inside the completion's transaction.
+    ///
+    /// The spawn's `created` event carries `{"repeat_of": …}` so the EOD report
+    /// can tell scheduling machinery from work the user captured. The rule
+    /// *moves* to the new occurrence — exactly one node in a chain carries it,
+    /// so manually reopening and re-finishing the old one cannot mint
+    /// duplicate futures.
+    fn insert_spawn(&self, plan: &SpawnPlan, at: &Hlc) -> Result<()> {
+        let now = at.wall_ms as i64;
+        let hlc = at.to_string();
+        self.store.execute(
+            "INSERT INTO node (account_id, id, parent_id, kind, promoted, title, body_md, \
+             body_state, status, order_key, created_at, updated_at, hlc, scheduled_for, \
+             repeat_rule) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            &[
+                self.account(),
+                plan.id.as_str().into(),
+                plan.parent_id.clone().into(),
+                plan.kind.as_str().into(),
+                i64::from(plan.promoted).into(),
+                plan.title.as_str().into(),
+                plan.body_md.as_str().into(),
+                plan.body_state.as_str().into(),
+                plan.status.as_str().into(),
+                plan.order_key.as_str().into(),
+                now.into(),
+                now.into(),
+                hlc.as_str().into(),
+                plan.scheduled_for.as_str().into(),
+                plan.rule.as_str().into(),
+            ],
+        )?;
+        self.store.execute(
+            "UPDATE node SET repeat_rule = NULL WHERE account_id = ? AND id = ?",
+            &[self.account(), plan.origin_id.as_str().into()],
+        )?;
+        // Tags and collection memberships travel — next week's watering is
+        // still #home and still in the same collection.
+        self.store.execute(
+            "INSERT INTO node_tag (account_id, node_id, tag_id, added_at, deleted, hlc) \
+             SELECT account_id, ?, tag_id, ?, 0, ? FROM node_tag \
+             WHERE account_id = ? AND node_id = ? AND deleted = 0",
+            &[
+                plan.id.as_str().into(),
+                now.into(),
+                hlc.as_str().into(),
+                self.account(),
+                plan.origin_id.as_str().into(),
+            ],
+        )?;
+        self.store.execute(
+            "INSERT INTO node_collection (account_id, node_id, collection_id, order_key, \
+             tombstone, hlc) \
+             SELECT account_id, ?, collection_id, order_key, 0, ? FROM node_collection \
+             WHERE account_id = ? AND node_id = ? AND tombstone = 0",
+            &[
+                plan.id.as_str().into(),
+                hlc.as_str().into(),
+                self.account(),
+                plan.origin_id.as_str().into(),
+            ],
+        )?;
+        self.emit(
+            at,
+            &plan.id,
+            EventType::Created,
+            None,
+            Some(&plan.title),
+            Some(&format!(r#"{{"repeat_of":"{}"}}"#, plan.origin_id)),
+        )
     }
 
     /// `p` — promote a sub-item to a full todo **in place**.
@@ -1518,23 +1732,12 @@ impl<S: Store> Engine<S> {
     /// Events in `[from_ms, to_ms)`, oldest first — the EOD report's input.
     pub fn events_between(&self, from_ms: i64, to_ms: i64) -> Result<Vec<EventView>> {
         let rows = self.store.query(
-            "SELECT id, node_id, type, from_value, to_value, occurred_at, occurred_ms \
+            "SELECT id, node_id, type, from_value, to_value, occurred_at, occurred_ms, payload \
              FROM event WHERE account_id = ? AND occurred_ms >= ? AND occurred_ms < ? \
              ORDER BY occurred_ms, occurred_at",
             &[self.account(), from_ms.into(), to_ms.into()],
         )?;
-        Ok(rows
-            .iter()
-            .map(|r| EventView {
-                id: r[0].text_or_default(),
-                node_id: r[1].text_or_default(),
-                r#type: r[2].text_or_default(),
-                from_value: r[3].as_str().map(str::to_owned),
-                to_value: r[4].as_str().map(str::to_owned),
-                occurred_at: r[5].text_or_default(),
-                occurred_ms: r[6].as_i64().unwrap_or(0),
-            })
-            .collect())
+        Ok(rows.iter().map(|r| decode_event(r)).collect())
     }
 
     // -- attachments -------------------------------------------------------
@@ -1672,26 +1875,28 @@ impl<S: Store> Engine<S> {
     /// Every event for one node, oldest first.
     pub fn events_for_node(&self, node_id: &str) -> Result<Vec<EventView>> {
         let rows = self.store.query(
-            "SELECT id, node_id, type, from_value, to_value, occurred_at, occurred_ms \
+            "SELECT id, node_id, type, from_value, to_value, occurred_at, occurred_ms, payload \
              FROM event WHERE account_id = ? AND node_id = ? ORDER BY occurred_ms, occurred_at",
             &[self.account(), node_id.into()],
         )?;
-        Ok(rows
-            .iter()
-            .map(|r| EventView {
-                id: r[0].text_or_default(),
-                node_id: r[1].text_or_default(),
-                r#type: r[2].text_or_default(),
-                from_value: r[3].as_str().map(str::to_owned),
-                to_value: r[4].as_str().map(str::to_owned),
-                occurred_at: r[5].text_or_default(),
-                occurred_ms: r[6].as_i64().unwrap_or(0),
-            })
-            .collect())
+        Ok(rows.iter().map(|r| decode_event(r)).collect())
     }
 }
 
 // -- helpers ---------------------------------------------------------------
+
+fn decode_event(r: &[SqlValue]) -> EventView {
+    EventView {
+        id: r[0].text_or_default(),
+        node_id: r[1].text_or_default(),
+        r#type: r[2].text_or_default(),
+        from_value: r[3].as_str().map(str::to_owned),
+        to_value: r[4].as_str().map(str::to_owned),
+        occurred_at: r[5].text_or_default(),
+        occurred_ms: r[6].as_i64().unwrap_or(0),
+        payload: r[7].as_str().map(str::to_owned),
+    }
+}
 
 fn decode_node(
     row: &[SqlValue],
@@ -1719,6 +1924,7 @@ fn decode_node(
         completed_at: row[11].as_i64(),
         collapsed: row[12].as_bool(),
         scheduled_for: row[13].as_str().map(str::to_owned),
+        repeat_rule: row[14].as_str().map(str::to_owned),
         depth,
         has_children: false,
         tags: Vec::new(),
@@ -1907,6 +2113,9 @@ mod tests {
     use super::*;
     use crate::store::SqliteStore;
 
+    /// The host-resolved civil day every completion in these tests happens on.
+    const TODAY: &str = "2026-01-05";
+
     fn engine() -> Engine<SqliteStore> {
         Engine::open(
             SqliteStore::in_memory().unwrap(),
@@ -2091,13 +2300,13 @@ mod tests {
             .unwrap();
         let node = e.create_node(None, "Call the bank", None).unwrap();
 
-        e.set_status(&node.id, &errand.id).unwrap();
+        e.set_status(&node.id, &errand.id, TODAY).unwrap();
         let read = e.node(&node.id).unwrap().unwrap();
         assert_eq!(read.status, errand.id);
         assert_eq!(read.status_category, StatusCategory::Open);
 
         // `x` still lands on the default done status, whatever else exists.
-        e.toggle_done(&node.id).unwrap();
+        e.toggle_done(&node.id, TODAY).unwrap();
         assert_eq!(e.node(&node.id).unwrap().unwrap().status, "done");
     }
 
@@ -2108,7 +2317,7 @@ mod tests {
             .create_status("Handed over", StatusCategory::Done, None)
             .unwrap();
         let node = e.create_node(None, "Lend the drill", None).unwrap();
-        e.set_status(&node.id, &shipped.id).unwrap();
+        e.set_status(&node.id, &shipped.id, TODAY).unwrap();
 
         let read = e.node(&node.id).unwrap().unwrap();
         assert_eq!(read.status_category, StatusCategory::Done);
@@ -2128,7 +2337,7 @@ mod tests {
     fn deleting_a_status_reassigns_its_nodes() {
         let e = engine();
         let node = e.create_node(None, "Waiting on plumber", None).unwrap();
-        e.set_status(&node.id, "waiting").unwrap();
+        e.set_status(&node.id, "waiting", TODAY).unwrap();
 
         e.delete_status("waiting").unwrap();
         assert_eq!(
@@ -2184,10 +2393,117 @@ mod tests {
         let e = engine();
         e.rename_status("done", "Shipped").unwrap();
         let node = e.create_node(None, "task", None).unwrap();
-        e.toggle_done(&node.id).unwrap();
+        e.toggle_done(&node.id, TODAY).unwrap();
         let read = e.node(&node.id).unwrap().unwrap();
         assert_eq!(read.status_category, StatusCategory::Done);
         assert!(read.completed_at.is_some());
+    }
+
+    // -- repeating todos ----------------------------------------------------
+
+    #[test]
+    fn completing_a_repeating_todo_spawns_the_next_occurrence() {
+        let e = engine();
+        let node = e.create_node(None, "Water the plants", None).unwrap();
+        e.add_tag(&node.id, "home").unwrap();
+        e.set_repeat(&node.id, Some("every monday")).unwrap();
+        // TODAY (2026-01-05) is a Monday; the plan day is today.
+        e.set_scheduled(&node.id, Some(TODAY)).unwrap();
+
+        let spawned = e.toggle_done(&node.id, TODAY).unwrap().expect("no spawn");
+
+        assert_eq!(spawned.title, "Water the plants");
+        assert_eq!(spawned.status_category, StatusCategory::Open);
+        assert_eq!(spawned.scheduled_for.as_deref(), Some("2026-01-12"));
+        assert_eq!(spawned.repeat_rule.as_deref(), Some("every monday"));
+        assert_eq!(
+            spawned
+                .tags
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["home"],
+            "tags must travel to the next occurrence"
+        );
+
+        // The rule moves: the finished occurrence is history, the live one
+        // carries the chain. Placed directly after the origin.
+        let origin = e.node(&node.id).unwrap().unwrap();
+        assert_eq!(origin.repeat_rule, None);
+        assert_eq!(origin.status_category, StatusCategory::Done);
+        let ids: Vec<String> = e.list_tree().unwrap().into_iter().map(|n| n.id).collect();
+        assert_eq!(ids, vec![node.id.clone(), spawned.id.clone()]);
+
+        // Re-finishing the origin after a manual reopen must not mint a second
+        // future — the rule is no longer its to run.
+        e.toggle_done(&node.id, TODAY).unwrap();
+        let again = e.toggle_done(&node.id, TODAY).unwrap();
+        assert!(again.is_none(), "a rule-less completion spawned");
+    }
+
+    #[test]
+    fn completion_and_spawn_share_one_transaction_and_one_stamp() {
+        let e = engine();
+        let node = e.create_node(None, "Stretch", None).unwrap();
+        e.set_repeat(&node.id, Some("every day")).unwrap();
+        let spawned = e.toggle_done(&node.id, TODAY).unwrap().expect("no spawn");
+
+        let completed = e.events_for_node(&node.id).unwrap();
+        let created = e.events_for_node(&spawned.id).unwrap();
+        assert_eq!(
+            completed.last().unwrap().occurred_at,
+            created.last().unwrap().occurred_at,
+            "the completion and the spawn must carry the same HLC"
+        );
+        assert!(
+            created
+                .last()
+                .unwrap()
+                .payload
+                .as_deref()
+                .unwrap_or("")
+                .contains(&node.id),
+            "the spawn's created event must name its origin"
+        );
+    }
+
+    #[test]
+    fn an_unscheduled_repeater_anchors_on_today() {
+        let e = engine();
+        let node = e.create_node(None, "Backups", None).unwrap();
+        e.set_repeat(&node.id, Some("every 3 days")).unwrap();
+        let spawned = e.toggle_done(&node.id, TODAY).unwrap().expect("no spawn");
+        assert_eq!(spawned.scheduled_for.as_deref(), Some("2026-01-08"));
+    }
+
+    #[test]
+    fn only_completion_continues_the_chain() {
+        let e = engine();
+        let node = e.create_node(None, "Weekly review", None).unwrap();
+        e.set_repeat(&node.id, Some("every week")).unwrap();
+
+        // Progress between open states: no spawn.
+        assert!(e
+            .set_status(&node.id, "in_progress", TODAY)
+            .unwrap()
+            .is_none());
+        // Dropping the occurrence ends the chain rather than continuing it.
+        assert!(e.set_status(&node.id, "dropped", TODAY).unwrap().is_none());
+        assert_eq!(e.list_tree().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn set_repeat_validates_and_canonicalizes() {
+        let e = engine();
+        let node = e.create_node(None, "task", None).unwrap();
+        assert!(e.set_repeat(&node.id, Some("whenever")).is_err());
+        e.set_repeat(&node.id, Some("  DAILY ")).unwrap();
+        assert_eq!(
+            e.node(&node.id).unwrap().unwrap().repeat_rule.as_deref(),
+            Some("every day")
+        );
+        e.set_repeat(&node.id, None).unwrap();
+        assert_eq!(e.node(&node.id).unwrap().unwrap().repeat_rule, None);
     }
 
     #[test]
@@ -2352,7 +2668,7 @@ mod tests {
             "updated_at drifted from the event that caused it"
         );
 
-        e.toggle_done(&node.id).unwrap();
+        e.toggle_done(&node.id, TODAY).unwrap();
         let done = e.node(&node.id).unwrap().unwrap();
         let completion = e
             .events_for_node(&node.id)
@@ -2370,7 +2686,7 @@ mod tests {
         let e = engine();
         let node = e.create_node(None, "task", None).unwrap();
         e.set_title(&node.id, "renamed").unwrap();
-        e.toggle_done(&node.id).unwrap();
+        e.toggle_done(&node.id, TODAY).unwrap();
         e.promote(&node.id).unwrap();
 
         let types = event_types(&e, &node.id);
@@ -2404,8 +2720,8 @@ mod tests {
         // `status_changed` would lose the distinction.
         let e = engine();
         let node = e.create_node(None, "task", None).unwrap();
-        e.toggle_done(&node.id).unwrap();
-        e.toggle_done(&node.id).unwrap();
+        e.toggle_done(&node.id, TODAY).unwrap();
+        e.toggle_done(&node.id, TODAY).unwrap();
 
         let types = event_types(&e, &node.id);
         assert!(types.contains(&"completed".to_string()));
@@ -2422,7 +2738,7 @@ mod tests {
 
         e.set_title(&node.id, "task").unwrap();
         e.set_body(&node.id, "").unwrap();
-        e.set_status(&node.id, "todo").unwrap();
+        e.set_status(&node.id, "todo", TODAY).unwrap();
 
         assert_eq!(e.events_for_node(&node.id).unwrap().len(), before);
     }
@@ -2431,13 +2747,13 @@ mod tests {
     fn completing_a_node_stamps_completed_at_and_reopening_clears_it() {
         let e = engine();
         let node = e.create_node(None, "task", None).unwrap();
-        e.toggle_done(&node.id).unwrap();
+        e.toggle_done(&node.id, TODAY).unwrap();
         let done = e.node(&node.id).unwrap().unwrap();
         assert_eq!(done.status, "done");
         assert_eq!(done.status_category, StatusCategory::Done);
         assert!(done.completed_at.is_some());
 
-        e.toggle_done(&node.id).unwrap();
+        e.toggle_done(&node.id, TODAY).unwrap();
         let reopened = e.node(&node.id).unwrap().unwrap();
         assert_eq!(reopened.status, "todo");
         assert!(reopened.completed_at.is_none());
@@ -2556,7 +2872,7 @@ mod tests {
     fn a_duplicate_of_a_done_node_starts_open() {
         let e = engine();
         let source = e.create_node(None, "done thing", None).unwrap();
-        e.toggle_done(&source.id).unwrap();
+        e.toggle_done(&source.id, TODAY).unwrap();
 
         let copy = e
             .duplicate_node(&source.id, None, Some(&source.id))

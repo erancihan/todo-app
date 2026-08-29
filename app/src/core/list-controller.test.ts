@@ -31,6 +31,7 @@ function node(partial: Partial<NodeView> & { id: string }): NodeView {
     updatedAt: 0,
     dueAt: null,
     scheduledFor: null,
+    repeatRule: null,
     completedAt: null,
     collapsed: false,
     depth: 0,
@@ -50,10 +51,11 @@ function fakeEngine(tree: NodeView[]): EnginePort {
     createNode: vi.fn(() => Promise.resolve(node({ id: "new" }))),
     setTitle: vi.fn(stub),
     setBody: vi.fn(stub),
-    setStatus: vi.fn(stub),
+    setStatus: vi.fn(() => Promise.resolve(null)),
     setDue: vi.fn(stub),
     setScheduled: vi.fn(stub),
-    toggleDone: vi.fn(stub),
+    setRepeat: vi.fn(stub),
+    toggleDone: vi.fn(() => Promise.resolve(null)),
     promote: vi.fn(stub),
     demote: vi.fn(stub),
     restoreNode: vi.fn(() => Promise.resolve(1)),
@@ -740,12 +742,82 @@ describe("detail view", () => {
     const c = new ListController(engine, host);
     await c.refresh();
 
+    const today = localDayKey(new Date());
     await c.setStatus("root", "blocked");
-    expect(engine.setStatus).toHaveBeenCalledWith("root", "blocked");
+    expect(engine.setStatus).toHaveBeenCalledWith("root", "blocked", today);
     expect(c.snapshot.canUndo).toBe(true);
 
     await c.dispatch("undo");
-    expect(engine.setStatus).toHaveBeenLastCalledWith("root", "todo");
+    expect(engine.setStatus).toHaveBeenLastCalledWith("root", "todo", today);
+  });
+});
+
+describe("repeating todos", () => {
+  const today = localDayKey(new Date());
+
+  it("passes the host's civil day to toggle-done", async () => {
+    const engine = fakeEngine([node({ id: "root" })]);
+    const c = new ListController(engine, host);
+    await c.refresh();
+
+    await c.dispatch("toggle-done");
+    expect(engine.toggleDone).toHaveBeenCalledWith("root", today);
+  });
+
+  it("undoing a completion erases the spawned occurrence and returns the rule", async () => {
+    const engine = fakeEngine([node({ id: "root", repeatRule: "every monday" })]);
+    (engine.toggleDone as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      node({ id: "spawn", scheduledFor: "2026-09-07", repeatRule: "every monday" }),
+    );
+    const c = new ListController(engine, host);
+    await c.refresh();
+
+    await c.dispatch("toggle-done");
+    await c.dispatch("undo");
+
+    expect(engine.toggleDone).toHaveBeenCalledTimes(2);
+    expect(engine.deleteNode).toHaveBeenCalledWith("spawn");
+    expect(engine.setRepeat).toHaveBeenCalledWith("root", "every monday");
+  });
+
+  it("undoing a plain completion deletes nothing", async () => {
+    const engine = fakeEngine([node({ id: "root" })]);
+    const c = new ListController(engine, host);
+    await c.refresh();
+
+    await c.dispatch("toggle-done");
+    await c.dispatch("undo");
+
+    expect(engine.deleteNode).not.toHaveBeenCalled();
+    expect(engine.setRepeat).not.toHaveBeenCalled();
+  });
+
+  it("setRepeatRule is undoable back to the previous rule", async () => {
+    const engine = fakeEngine([node({ id: "root", repeatRule: "every day" })]);
+    const c = new ListController(engine, host);
+    await c.refresh();
+
+    await c.setRepeatRule("root", "every 2 weeks");
+    expect(engine.setRepeat).toHaveBeenCalledWith("root", "every 2 weeks");
+
+    await c.dispatch("undo");
+    expect(engine.setRepeat).toHaveBeenLastCalledWith("root", "every day");
+  });
+
+  it("the !every token adopts the rule and plans its first occurrence in one step", async () => {
+    const engine = fakeEngine([node({ id: "root" })]);
+    const c = new ListController(engine, host);
+    await c.refresh();
+
+    await c.applyRepeatRule("root", "every day");
+    expect(engine.setRepeat).toHaveBeenCalledWith("root", "every day");
+    expect(engine.setScheduled).toHaveBeenCalledWith("root", today);
+
+    // One gesture in, one undo out.
+    await c.dispatch("undo");
+    expect(engine.setRepeat).toHaveBeenLastCalledWith("root", null);
+    expect(engine.setScheduled).toHaveBeenLastCalledWith("root", null);
+    expect(c.snapshot.canUndo).toBe(false);
   });
 });
 

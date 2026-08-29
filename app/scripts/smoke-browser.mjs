@@ -500,6 +500,63 @@ try {
     JSON.stringify(dateToken),
   );
 
+  // --- repeating todos ----------------------------------------------------
+  // `!every friday` adopts a rule and plans the first occurrence; completing
+  // the todo must spawn the next one — new row, schedule advanced, rule moved —
+  // all inside the engine's own transaction.
+  await page.keyboard.press("n");
+  await page.waitForTimeout(700);
+  await page.locator(".cm-content").first().click();
+  await page.keyboard.type("Water the plants !every friday");
+  await page.locator(".cm-tooltip-autocomplete").waitFor({ timeout: 5_000 });
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(500);
+  await page.keyboard.press("Control+Enter");
+  await page.waitForTimeout(700);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(700);
+
+  const ruled = await page.evaluate(() => {
+    const d = window.Alpine.$data(document.getElementById("app"));
+    const n = d.state.nodes.find((x) => x.title.startsWith("Water the plants"));
+    return n ? { rule: n.repeatRule, scheduled: n.scheduledFor, body: n.bodyMd } : null;
+  });
+  check(
+    "!every friday adopts the rule and plans the first occurrence",
+    Boolean(ruled) &&
+      ruled.rule === "every friday" &&
+      Boolean(ruled.scheduled) &&
+      !ruled.body.includes("!every"),
+    JSON.stringify(ruled),
+  );
+
+  await page.evaluate(() => {
+    const d = window.Alpine.$data(document.getElementById("app"));
+    const n = d.state.nodes.find((x) => x.title.startsWith("Water the plants"));
+    d.toggleDone(n, new Event("click"));
+  });
+  await page.waitForTimeout(1200);
+  const chain = await page.evaluate(() => {
+    const d = window.Alpine.$data(document.getElementById("app"));
+    const occurrences = d.state.nodes.filter((x) => x.title.startsWith("Water the plants"));
+    const donePart = occurrences.find((x) => x.statusCategory === "done");
+    const openPart = occurrences.find((x) => x.statusCategory === "open");
+    return {
+      count: occurrences.length,
+      doneKeepsNoRule: donePart ? donePart.repeatRule === null : false,
+      openCarriesRule: openPart ? openPart.repeatRule === "every friday" : false,
+      advanced:
+        Boolean(openPart?.scheduledFor) &&
+        Boolean(donePart?.scheduledFor) &&
+        openPart.scheduledFor > donePart.scheduledFor,
+    };
+  });
+  check(
+    "completing it spawns the next occurrence and moves the rule",
+    chain.count === 2 && chain.doneKeepsNoRule && chain.openCarriesRule && chain.advanced,
+    JSON.stringify(chain),
+  );
+
   // --- user-defined statuses ----------------------------------------------
   // The vocabulary is data now. This drives the wasm boundary: create a custom
   // status, see it come back typed, apply it, and confirm `x` still finishes a
@@ -507,12 +564,15 @@ try {
   const statusRoundTrip = await page.evaluate(async () => {
     const mod = await import("/src/core/engine-port.ts");
     const port = mod.engine();
+    const pad = (n) => String(n).padStart(2, "0");
+    const t = new Date();
+    const today = `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}`;
     const made = await port.createStatus("Errand", "open", null);
     const listed = await port.listStatuses();
     const node = await port.createNode(null, "Pick up the parcel", null);
-    await port.setStatus(node.id, made.id);
+    await port.setStatus(node.id, made.id, today);
     const applied = await port.node(node.id);
-    await port.toggleDone(node.id);
+    await port.toggleDone(node.id, today);
     const finished = await port.node(node.id);
     await port.deleteNode(node.id);
     await port.deleteStatus(made.id);

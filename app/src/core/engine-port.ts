@@ -68,6 +68,8 @@ export interface NodeView {
   dueAt: number | null;
   /** The civil day this is planned for, as `YYYY-MM-DD`, or null. */
   scheduledFor: string | null;
+  /** Canonical repeat rule ("every monday"), or null for a one-off. */
+  repeatRule: string | null;
   completedAt: number | null;
   collapsed: boolean;
   /** Depth in the tree, 0 for a root todo. Derived by the engine. */
@@ -179,7 +181,13 @@ export interface EnginePort {
   createNode(parentId: string | null, title: string, after: string | null): Promise<NodeView>;
   setTitle(id: string, title: string): Promise<void>;
   setBody(id: string, markdown: string): Promise<void>;
-  setStatus(id: string, status: Status): Promise<void>;
+  /**
+   * `today` is the viewer's civil day (`localDayKey(new Date())`), needed
+   * because completing a repeating todo spawns its next occurrence inside the
+   * engine's transaction. The spawned occurrence comes back so undo can erase
+   * it; `null` when nothing was spawned.
+   */
+  setStatus(id: string, status: Status, today: string): Promise<NodeView | null>;
   listStatuses(): Promise<StatusView[]>;
   createStatus(name: string, category: StatusCategory, color: string | null): Promise<StatusView>;
   renameStatus(id: string, name: string): Promise<void>;
@@ -190,7 +198,10 @@ export interface EnginePort {
   setDue(id: string, dueMs: number | null): Promise<void>;
   /** `null` clears the plan day. A civil `YYYY-MM-DD`, resolved by the host. */
   setScheduled(id: string, day: string | null): Promise<void>;
-  toggleDone(id: string): Promise<void>;
+  /** `null` clears the rule; the engine stores the canonical spelling. */
+  setRepeat(id: string, rule: string | null): Promise<void>;
+  /** `today` and the return value: see `setStatus`. */
+  toggleDone(id: string, today: string): Promise<NodeView | null>;
   promote(id: string): Promise<void>;
   demote(id: string): Promise<void>;
   duplicateNode(id: string, newParent: string | null, after: string | null): Promise<NodeView>;
@@ -265,8 +276,8 @@ class TauriEnginePort implements EnginePort {
   setBody(id: string, markdown: string) {
     return this.invoke<void>("set_body", { id, markdown });
   }
-  setStatus(id: string, status: Status) {
-    return this.invoke<void>("set_status", { id, status });
+  setStatus(id: string, status: Status, today: string) {
+    return this.invoke<NodeView | null>("set_status", { id, status, today });
   }
   listStatuses() {
     return this.invoke<StatusView[]>("list_statuses");
@@ -292,8 +303,11 @@ class TauriEnginePort implements EnginePort {
   setScheduled(id: string, day: string | null) {
     return this.invoke<void>("set_scheduled", { id, day });
   }
-  toggleDone(id: string) {
-    return this.invoke<void>("toggle_done", { id });
+  setRepeat(id: string, rule: string | null) {
+    return this.invoke<void>("set_repeat", { id, rule });
+  }
+  toggleDone(id: string, today: string) {
+    return this.invoke<NodeView | null>("toggle_done", { id, today });
   }
   promote(id: string) {
     return this.invoke<void>("promote", { id });
@@ -580,8 +594,8 @@ class WasmEnginePort implements EnginePort {
   setBody(id: string, markdown: string) {
     return this.call<void>("setBody", id, markdown);
   }
-  setStatus(id: string, status: Status) {
-    return this.call<void>("setStatus", id, status);
+  setStatus(id: string, status: Status, today: string) {
+    return this.call<NodeView | null>("setStatus", id, status, today);
   }
   listStatuses() {
     return this.call<StatusView[]>("listStatuses");
@@ -607,8 +621,11 @@ class WasmEnginePort implements EnginePort {
   setScheduled(id: string, day: string | null) {
     return this.call<void>("setScheduled", id, day ?? undefined);
   }
-  toggleDone(id: string) {
-    return this.call<void>("toggleDone", id);
+  setRepeat(id: string, rule: string | null) {
+    return this.call<void>("setRepeat", id, rule ?? undefined);
+  }
+  toggleDone(id: string, today: string) {
+    return this.call<NodeView | null>("toggleDone", id, today);
   }
   promote(id: string) {
     return this.call<void>("promote", id);

@@ -160,3 +160,103 @@ export const DAY_SUGGESTIONS = [
   "in 3 days",
   "in 2 weeks",
 ] as const;
+
+// -- the `!every` repeat grammar --------------------------------------------
+//
+// A TypeScript mirror of `crates/core/src/repeat.rs` — the engine's parser is
+// the authority (it validates again on `setRepeat`), this one exists so the
+// completion menu can recognise a rule as it is typed and plan the first
+// occurrence. Weekday numbering matches JS `getDay`, same as the Rust side.
+
+export interface ParsedRepeat {
+  /** Canonical rule text, exactly what the engine stores — "every monday". */
+  rule: string;
+  /** The first occurrence to plan: today, or the coming matching day. */
+  firstDay: string;
+  /** Menu preview for that first day — "Mon, Sep 1". */
+  label: string;
+}
+
+const REPEAT_SYNONYMS: Record<string, string> = {
+  daily: "days",
+  weekly: "weeks",
+  monthly: "months",
+  yearly: "years",
+  annually: "years",
+};
+
+const REPEAT_UNITS: Record<string, string> = {
+  day: "days",
+  days: "days",
+  week: "weeks",
+  weeks: "weeks",
+  month: "months",
+  months: "months",
+  year: "years",
+  years: "years",
+};
+
+const UNIT_SINGULAR: Record<string, string> = {
+  days: "day",
+  weeks: "week",
+  months: "month",
+  years: "year",
+};
+
+export function parseRepeatToken(input: string, now: Date = new Date()): ParsedRepeat | null {
+  const words = input.trim().toLowerCase().split(/\s+/).filter(Boolean);
+
+  let kind: string | null = null;
+  let n = 1;
+  let weekday = -1;
+
+  if (words.length === 1) {
+    kind = REPEAT_SYNONYMS[words[0]!] ?? null;
+  } else if (words[0] !== "every") {
+    return null;
+  } else if (words.length === 2) {
+    const unit = words[1]!;
+    if (unit === "weekday") {
+      kind = "weekdays";
+    } else if (REPEAT_UNITS[unit] && !unit.endsWith("s")) {
+      kind = REPEAT_UNITS[unit]!;
+    } else {
+      weekday = weekdayIndex(unit);
+      if (weekday !== -1) kind = "weekday";
+    }
+  } else if (words.length === 3) {
+    const count = Number(words[1]);
+    if (!Number.isInteger(count) || count < 1 || count > 999) return null;
+    n = count;
+    kind = REPEAT_UNITS[words[2]!] ?? null;
+  }
+  if (!kind) return null;
+
+  let rule: string;
+  let first: Date;
+  if (kind === "weekday") {
+    rule = `every ${WEEKDAYS[weekday]!}`;
+    // The coming matching day, today included — same convention as the bare
+    // weekday date token.
+    first = addDays(now, (weekday - now.getDay() + 7) % 7);
+  } else if (kind === "weekdays") {
+    rule = "every weekday";
+    first = new Date(now);
+    while (first.getDay() === 0 || first.getDay() === 6) first = addDays(first, 1);
+  } else {
+    rule = n === 1 ? `every ${UNIT_SINGULAR[kind]!}` : `every ${n} ${kind}`;
+    // Interval rules start now: the task exists, today is its first occurrence,
+    // and completing it is what advances the chain.
+    first = now;
+  }
+
+  return { rule, firstDay: localDayKey(first), label: preview(first) };
+}
+
+/** Repeat forms the menu offers alongside the plain days. */
+export const REPEAT_SUGGESTIONS = [
+  "every day",
+  "every week",
+  "every month",
+  "every weekday",
+] as const;

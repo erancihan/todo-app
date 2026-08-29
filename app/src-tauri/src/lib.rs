@@ -107,13 +107,34 @@ fn set_body(state: tauri::State<'_, AppState>, id: String, markdown: String) -> 
         .map_err(to_err)
 }
 
+/// `today` is the WebView's civil day. Returns the spawned next occurrence
+/// when completing a repeating todo, else `None`.
 #[tauri::command]
-fn set_status(state: tauri::State<'_, AppState>, id: String, status: String) -> CmdResult<()> {
+fn set_status(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    status: String,
+    today: String,
+) -> CmdResult<Option<NodeView>> {
     state
         .engine
         .lock()
         .unwrap()
-        .set_status(&id, &status)
+        .set_status(&id, &status, &today)
+        .map_err(to_err)
+}
+
+#[tauri::command]
+fn set_repeat(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    rule: Option<String>,
+) -> CmdResult<()> {
+    state
+        .engine
+        .lock()
+        .unwrap()
+        .set_repeat(&id, rule.as_deref())
         .map_err(to_err)
 }
 
@@ -196,12 +217,16 @@ fn delete_status(state: tauri::State<'_, AppState>, id: String) -> CmdResult<()>
 }
 
 #[tauri::command]
-fn toggle_done(state: tauri::State<'_, AppState>, id: String) -> CmdResult<()> {
+fn toggle_done(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    today: String,
+) -> CmdResult<Option<NodeView>> {
     state
         .engine
         .lock()
         .unwrap()
-        .toggle_done(&id)
+        .toggle_done(&id, &today)
         .map_err(to_err)
 }
 
@@ -490,6 +515,7 @@ pub fn run() {
             delete_status,
             set_tag_color,
             set_scheduled,
+            set_repeat,
             toggle_done,
             promote,
             demote,

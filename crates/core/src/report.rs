@@ -200,7 +200,19 @@ struct Touch {
 impl Touch {
     fn apply(&mut self, event: &EventView) {
         match event.r#type.as_str() {
-            "created" => self.created = true,
+            // A `created` carrying `repeat_of` is a spawned occurrence of a
+            // repeating todo — scheduling machinery, not work the user captured.
+            // It must not appear under CREATED; if the user then actually
+            // touches the spawn, those later events bucket it as usual.
+            "created" => {
+                if !event
+                    .payload
+                    .as_deref()
+                    .is_some_and(|p| p.contains("repeat_of"))
+                {
+                    self.created = true;
+                }
+            }
             "completed" => {
                 self.completed = true;
                 self.reopened_after_completion = false;
@@ -721,6 +733,9 @@ mod tests {
     use crate::ids::DeviceId;
     use crate::store::SqliteStore;
 
+    /// The host-resolved civil day every completion in these tests happens on.
+    const TODAY: &str = "2026-01-05";
+
     fn engine() -> Engine<SqliteStore> {
         Engine::open(
             SqliteStore::in_memory().unwrap(),
@@ -758,7 +773,7 @@ mod tests {
     fn completing_a_todo_beats_creating_it() {
         let e = engine();
         let node = e.create_node(None, "Fix the backoff", None).unwrap();
-        e.toggle_done(&node.id).unwrap();
+        e.toggle_done(&node.id, TODAY).unwrap();
 
         let report = e.generate_report(&today(&e)).unwrap();
         // Captured and finished in one day is a completion, not a creation —
@@ -773,8 +788,8 @@ mod tests {
     fn completing_then_reopening_is_an_update() {
         let e = engine();
         let node = e.create_node(None, "Half done", None).unwrap();
-        e.toggle_done(&node.id).unwrap();
-        e.toggle_done(&node.id).unwrap();
+        e.toggle_done(&node.id, TODAY).unwrap();
+        e.toggle_done(&node.id, TODAY).unwrap();
 
         let report = e.generate_report(&today(&e)).unwrap();
         assert_eq!(
@@ -782,6 +797,21 @@ mod tests {
             "reopened item still counted done"
         );
         assert_eq!(report.counts.created, 1);
+    }
+
+    #[test]
+    fn a_spawned_occurrence_is_not_todays_news() {
+        let e = engine();
+        let node = e.create_node(None, "Water the plants", None).unwrap();
+        e.set_repeat(&node.id, Some("every week")).unwrap();
+        e.toggle_done(&node.id, TODAY).unwrap().expect("no spawn");
+
+        let report = e.generate_report(&today(&e)).unwrap();
+        // The day's story is "watered the plants", full stop. The next
+        // occurrence is scheduling machinery — counting it under CREATED would
+        // make every repeating chore read as new work, every single day.
+        assert_eq!(report.counts.completed, 1);
+        assert_eq!(report.counts.created, 0);
     }
 
     #[test]
@@ -818,7 +848,7 @@ mod tests {
         let child = e
             .create_node(Some(&root.id), "Query the log", None)
             .unwrap();
-        e.toggle_done(&child.id).unwrap();
+        e.toggle_done(&child.id, TODAY).unwrap();
 
         let report = e.generate_report(&today(&e)).unwrap();
         let lines: Vec<&str> = report
@@ -888,7 +918,7 @@ mod tests {
         let child = e
             .create_node(Some(&root.id), "Query the log", None)
             .unwrap();
-        e.toggle_done(&child.id).unwrap();
+        e.toggle_done(&child.id, TODAY).unwrap();
 
         let report = e.generate_report(&today(&e)).unwrap();
         let headings: Vec<&str> = report.sections.iter().map(|s| s.heading.as_str()).collect();
@@ -989,7 +1019,7 @@ mod tests {
     fn a_finished_todo_never_carries_over() {
         let e = engine();
         let node = e.create_node(None, "Done thing", None).unwrap();
-        e.toggle_done(&node.id).unwrap();
+        e.toggle_done(&node.id, TODAY).unwrap();
         let touched = e.node(&node.id).unwrap().unwrap().updated_at;
 
         let options = ReportOptions {
@@ -1079,7 +1109,7 @@ mod tests {
             e.add_to_collection(&n.id, &work.id).unwrap();
             e.add_tag(&n.id, &format!("tag{}", i % 2)).unwrap();
             if i % 2 == 0 {
-                e.toggle_done(&n.id).unwrap();
+                e.toggle_done(&n.id, TODAY).unwrap();
             }
         }
         let options = today(&e);

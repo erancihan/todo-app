@@ -105,6 +105,8 @@ interface AppComponent {
   schedulePick(day: string): void;
   detailScheduledValue(): string;
   setDetailScheduled(day: string): void;
+  detailRepeatValue(): string;
+  setDetailRepeat(rule: string): void;
   /**
    * Lookups the row bindings need, mirrored so they are built once per change
    * rather than once per row. Scanning the node or collection list inside a
@@ -226,6 +228,10 @@ Alpine.data("daybook", (): AppComponent => {
     applySchedule: (day) => {
       const id = target();
       if (id) void controller.setScheduledDay(id, day);
+    },
+    applyRepeat: (rule) => {
+      const id = target();
+      if (id) void controller.applyRepeatRule(id, rule);
     },
     applyCollection: (name) => {
       const id = target();
@@ -614,6 +620,12 @@ Alpine.data("daybook", (): AppComponent => {
     },
     setDetailScheduled(day) {
       if (this.detail) void controller.setScheduledDay(this.detail.id, day || null);
+    },
+    detailRepeatValue() {
+      return this.detail?.repeatRule ?? "";
+    },
+    setDetailRepeat(rule) {
+      if (this.detail) void controller.setRepeatRule(this.detail.id, rule.trim() || null);
     },
     toggleSidebar() {
       controller.setSidebarCollapsed(!this.state.sidebarCollapsed);

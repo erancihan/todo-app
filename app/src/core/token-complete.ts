@@ -22,7 +22,12 @@ import {
 import type { Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 
-import { DAY_SUGGESTIONS, parseDayToken } from "./date-token";
+import {
+  DAY_SUGGESTIONS,
+  parseDayToken,
+  parseRepeatToken,
+  REPEAT_SUGGESTIONS,
+} from "./date-token";
 
 export interface TokenSources {
   /** Existing tag names, for suggestions. */
@@ -35,6 +40,8 @@ export interface TokenSources {
   applyCollection(name: string): void;
   /** Schedule that node for a civil day (`YYYY-MM-DD`). */
   applySchedule(day: string): void;
+  /** Adopt a repeat rule (canonical text) and plan its first occurrence. */
+  applyRepeat(rule: string): void;
 }
 
 /**
@@ -100,14 +107,15 @@ function buildDates(
   from: number,
   to: number,
   typed: string,
-  apply: (day: string) => void,
+  applyDay: (day: string) => void,
+  applyRepeat: (rule: string) => void,
 ): CompletionResult | null {
   const now = new Date();
   const query = typed.toLowerCase().trim();
 
-  const commit = (day: string) => (view: EditorView) => {
+  const commit = (run: () => void) => (view: EditorView) => {
     view.dispatch({ changes: { from, to, insert: "" } });
-    apply(day);
+    run();
   };
 
   const options: Completion[] = [];
@@ -119,21 +127,43 @@ function buildDates(
       label: `!${name}`,
       detail: parsed.label,
       type: "constant",
-      apply: commit(parsed.day),
+      apply: commit(() => applyDay(parsed.day)),
+    });
+  }
+  for (const name of REPEAT_SUGGESTIONS) {
+    if (query && !name.startsWith(query)) continue;
+    const parsed = parseRepeatToken(name, now);
+    if (!parsed) continue;
+    options.push({
+      label: `!${name}`,
+      detail: `repeats · from ${parsed.label}`,
+      type: "constant",
+      apply: commit(() => applyRepeat(parsed.rule)),
     });
   }
 
-  // Direct input — "!aug 30", "!in 4 days" — that is not a suggestion prefix
-  // still parses; offer it first, previewed with the day it means.
+  // Direct input that is not a suggestion prefix — "!aug 30", "!in 4 days",
+  // "!every 2 weeks" — still parses; offer it first, previewed with what it
+  // means. A repeat rule and a day never collide: no day form starts "every".
   if (query && !DAY_SUGGESTIONS.some((s) => s === query)) {
-    const parsed = parseDayToken(query, now);
-    if (parsed) {
+    const day = parseDayToken(query, now);
+    if (day) {
       options.unshift({
         label: `!${query}`,
-        detail: parsed.label,
+        detail: day.label,
         type: "constant",
-        apply: commit(parsed.day),
+        apply: commit(() => applyDay(day.day)),
       });
+    } else if (!REPEAT_SUGGESTIONS.some((s) => s === query)) {
+      const repeat = parseRepeatToken(query, now);
+      if (repeat) {
+        options.unshift({
+          label: `!${repeat.rule}`,
+          detail: `repeats · from ${repeat.label}`,
+          type: "constant",
+          apply: commit(() => applyRepeat(repeat.rule)),
+        });
+      }
     }
   }
 
@@ -183,7 +213,7 @@ function source(sources: TokenSources) {
       // The regex admits a leading space so "!next week" works, but prose after
       // a bang — "So close! tomorrow we ship" — is not a token.
       if (typed.startsWith(" ")) return null;
-      return buildDates(date.from, date.to, typed, sources.applySchedule);
+      return buildDates(date.from, date.to, typed, sources.applySchedule, sources.applyRepeat);
     }
 
     return null;
