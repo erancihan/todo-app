@@ -14,13 +14,13 @@ The report is derived from the immutable event log and is byte-identical on both
 ```markdown
 # EOD — 2026-08-23
 
-## Work
-- [ ] **Ship the EOD report v1**  `#reporting`
-  - [x] Query the event log by date range · done 07:21
-  - [ ] Carry-over logic
+## Home
+- [ ] **Plan the birthday dinner**  `#family`
+  - [x] Book the restaurant · done 12:40
+  - [ ] Send the invitations
 
 ## Uncollected
-- [x] **Fix sync retry backoff** · done 07:21
+- [x] **Renew the passport** · done 09:15
 
 _Created 2 · Updated 0 · Completed 2 · Carried over 0_
 ```

@@ -308,6 +308,16 @@ fn set_due(state: tauri::State<'_, AppState>, id: String, due_ms: Option<i64>) -
         .map_err(to_err)
 }
 
+/// Open a URL in the system browser. The WebView must never navigate to an
+/// external site itself — a body is user text, and the shell is not a browser.
+#[tauri::command]
+fn open_url(url: String) -> CmdResult<()> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err("only http(s) links open externally".into());
+    }
+    open::that_detached(&url).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn put_blob(state: tauri::State<'_, AppState>, mime: String, bytes: Vec<u8>) -> CmdResult<String> {
     state
@@ -415,6 +425,7 @@ pub fn run() {
             events_between,
             events_for_node,
             set_due,
+            open_url,
             put_blob,
             blob,
             list_blobs,

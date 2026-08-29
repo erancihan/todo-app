@@ -108,7 +108,7 @@ try {
   const editor = page.locator(".cm-content");
   await editor.waitFor({ timeout: 30_000 });
   await editor.click();
-  await page.keyboard.type("Ship EOD report v1");
+  await page.keyboard.type("Book the dentist appointment");
   // Enter must insert a newline, not submit.
   await page.keyboard.press("Enter");
   await page.keyboard.type("second line");
@@ -144,7 +144,7 @@ try {
   const titles = await page.locator("li[role=treeitem] span.truncate").allTextContents();
   check(
     "the row title is derived without markdown syntax",
-    titles[0] === "Ship EOD report v1",
+    titles[0] === "Book the dentist appointment",
     `got ${JSON.stringify(titles)}`,
   );
 
@@ -174,7 +174,7 @@ try {
   // `t` opens the tag editor and applies a tag.
   await page.keyboard.press("t");
   await page.waitForTimeout(400);
-  await page.keyboard.type("urgent");
+  await page.keyboard.type("errands");
   await page.keyboard.press("Enter");
   await page.waitForTimeout(900);
   await page.keyboard.press("Escape");
@@ -309,7 +309,7 @@ try {
   );
   check(
     "the report names the work that was captured",
-    report.markdown.includes("Ship EOD report v1"),
+    report.markdown.includes("Book the dentist appointment"),
     report.markdown.slice(0, 200),
   );
   // The report is a pure function of the log, so asking twice must not change
@@ -338,7 +338,7 @@ try {
   );
 
   const bodyText = await page.locator("body").textContent();
-  check("the captured todo is still there", bodyText.includes("Ship EOD report v1"));
+  check("the captured todo is still there", bodyText.includes("Book the dentist appointment"));
 
   // --- drag to reorder ----------------------------------------------------
   // The keyboard path is covered above; this is the only way a mouse can
@@ -395,7 +395,7 @@ try {
   await page.keyboard.press("n");
   await page.waitForTimeout(700);
   await page.locator(".cm-content").first().click();
-  await page.keyboard.type("Screenshot of the bug");
+  await page.keyboard.type("Postcard from the trip");
   await page.keyboard.press("Enter");
   await page.waitForTimeout(200);
   await page.evaluate(async () => {
@@ -433,6 +433,33 @@ try {
   await page.waitForTimeout(500);
   await page.keyboard.press("Escape");
   await page.waitForTimeout(900);
+
+  // --- link chips ---------------------------------------------------------
+  // A ticket URL in a body renders as a short reference chip, not a wall of
+  // URL — Daybook points at trackers, it does not become one.
+  await page.keyboard.press("n");
+  await page.waitForTimeout(700);
+  await page.locator(".cm-content").first().click();
+  await page.keyboard.type("Chase the plumber quote");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("context: https://github.com/acme/house/issues/12");
+  await page.keyboard.press("Control+Enter");
+  await page.waitForTimeout(600);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(700);
+  await page.keyboard.press("v");
+  await page.waitForTimeout(1200);
+  const chip = await page.evaluate(() => {
+    const el = document.querySelector(".cm-link-chip");
+    return el ? { label: el.textContent, href: el.getAttribute("href") } : null;
+  });
+  check(
+    "a ticket URL renders as a reference chip",
+    chip?.label === "acme/house#12" && chip?.href?.startsWith("https://github.com"),
+    JSON.stringify(chip),
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(600);
 
   // --- a second tab -------------------------------------------------------
   // OPFS grants its database lock to one context per origin, so this used to

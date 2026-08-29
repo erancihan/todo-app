@@ -25,6 +25,11 @@ serde_json = "=1.0.151"
 # Content-addressing for attachments. Pure Rust, no C, so it compiles for wasm32
 # as-is — which matters, because the hash has to be computed identically on both
 # hosts or the same bytes would get two names.
+# Opens a URL in the OS default browser — the Tauri shell's half of "links in a
+# body open externally". Chosen over tauri-plugin-opener because a plugin drags
+# in an ACL entry, a JS package, and capability config to do what one command
+# with this crate does.
+open = "=5.4.2"
 sha2 = "=0.10.9"
 thiserror = "=2.0.19"
 uuid = { version = "=1.24.0", features = ["v7"] }

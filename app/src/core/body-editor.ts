@@ -18,6 +18,8 @@ import { livePreview } from "./live-preview";
 import { tokenComplete, type TokenSources } from "./token-complete";
 import { attachments, type AttachmentSink } from "./attachments";
 import { imageWidgets, type AttachmentSource } from "./image-widget";
+import { linkChips } from "./link-chips";
+import { openExternal } from "./host";
 
 export interface BodyEditorCallbacks {
   /** `Ctrl/Cmd+Enter`. */
@@ -135,6 +137,7 @@ export class BodyEditor {
       keymap.of([...defaultKeymap, ...historyKeymap]),
       markdown(),
       livePreview(),
+      linkChips(openExternal),
       ...(this.callbacks.tokens ? [tokenComplete(this.callbacks.tokens)] : []),
       ...(this.callbacks.images
         ? [attachments(this.callbacks.images), imageWidgets(this.callbacks.images)]

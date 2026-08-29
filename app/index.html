@@ -528,21 +528,26 @@
               <div class="flex flex-col gap-5 text-[0.75rem] lg:sticky lg:top-8">
                 <div>
                   <h3 class="mb-1.5 text-[0.6875rem] font-[590] tracking-[0.06em] text-muted-foreground uppercase">
-                    Status
+                    Due
                   </h3>
-                  <div class="flex flex-wrap gap-1">
-                    <template x-for="s in STATUSES" :key="s.value">
-                      <button
-                        type="button"
-                        class="rounded-[var(--radius-sm)] border px-1.5 py-0.5 text-[0.6875rem]"
-                        :style="detail?.status === s.value
-                          ? `border-color: ${s.color}; color: ${s.color}`
-                          : 'border-color: var(--border); color: var(--muted-foreground)'"
-                        @click="setStatus(s.value)"
-                        x-text="s.label"
-                      ></button>
-                    </template>
-                  </div>
+                  <input
+                    type="date"
+                    class="w-full rounded-[var(--radius-sm)] border bg-transparent px-1.5 py-1 outline-none"
+                    style="border-color: var(--border)"
+                    :value="detailDueValue()"
+                    @change="setDetailDue($event.target.value)"
+                  />
+                  <!-- A due date keeps an item in the EOD report's carry-over
+                       scope even once it has aged past the recency window. -->
+                  <button
+                    type="button"
+                    x-show="detail?.dueAt"
+                    x-cloak
+                    class="mt-1 text-[0.6875rem] text-muted-foreground hover:text-foreground"
+                    @click="setDetailDue('')"
+                  >
+                    Clear
+                  </button>
                 </div>
 
                 <div>
@@ -602,27 +607,23 @@
 
                 <div>
                   <h3 class="mb-1.5 text-[0.6875rem] font-[590] tracking-[0.06em] text-muted-foreground uppercase">
-                    Due
+                    Status
                   </h3>
-                  <input
-                    type="date"
-                    class="w-full rounded-[var(--radius-sm)] border bg-transparent px-1.5 py-1 outline-none"
-                    style="border-color: var(--border)"
-                    :value="detailDueValue()"
-                    @change="setDetailDue($event.target.value)"
-                  />
-                  <!-- A due date keeps an item in the EOD report's carry-over
-                       scope even once it has aged past the recency window. -->
-                  <button
-                    type="button"
-                    x-show="detail?.dueAt"
-                    x-cloak
-                    class="mt-1 text-[0.6875rem] text-muted-foreground hover:text-foreground"
-                    @click="setDetailDue('')"
-                  >
-                    Clear
-                  </button>
+                  <div class="flex flex-wrap gap-1">
+                    <template x-for="s in STATUSES" :key="s.value">
+                      <button
+                        type="button"
+                        class="rounded-[var(--radius-sm)] border px-1.5 py-0.5 text-[0.6875rem]"
+                        :style="detail?.status === s.value
+                          ? `border-color: ${s.color}; color: ${s.color}`
+                          : 'border-color: var(--border); color: var(--muted-foreground)'"
+                        @click="setStatus(s.value)"
+                        x-text="s.label"
+                      ></button>
+                    </template>
+                  </div>
                 </div>
+
 
                 <div class="font-mono text-[0.6875rem] leading-relaxed text-muted-foreground">
                   <div>created <span x-text="stamp(detail?.createdAt)"></span></div>

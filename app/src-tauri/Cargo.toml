@@ -22,6 +22,7 @@ tauri-build = { workspace = true, features = [] }
 
 [dependencies]
 daybook-core = { path = "../../crates/core" }
+open = { workspace = true }
 tauri = { workspace = true, features = [] }
 serde = { workspace = true }
 serde_json = { workspace = true }
