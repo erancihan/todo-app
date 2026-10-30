@@ -152,10 +152,10 @@ pub struct Engine<S: Store> {
     clock: RefCell<HlcClock>,
 }
 
-/// The next occurrence of a repeating todo, fully resolved before the
-/// completion transaction opens so the inserts inside it cannot fail on
-/// anything but the store itself.
-struct SpawnPlan {
+/// One row of a spawned occurrence — the todo itself or one of its sub-items —
+/// fully resolved before the completion transaction opens so the inserts
+/// inside it cannot fail on anything but the store itself.
+struct SpawnRow {
     id: String,
     origin_id: String,
     parent_id: Option<String>,
@@ -166,8 +166,17 @@ struct SpawnPlan {
     body_state: String,
     status: String,
     order_key: String,
+}
+
+/// The next occurrence of a repeating todo: its row, the plan day and rule it
+/// carries, and its checklist. Sub-items come back fresh and open — a weekly
+/// review's checklist is part of the review, and a spawn that dropped it
+/// would make every recurring checklist a one-off.
+struct SpawnPlan {
+    root: SpawnRow,
     scheduled_for: String,
     rule: String,
+    children: Vec<SpawnRow>,
 }
 
 /// `YYYY-MM-DD` by shape. Calendar validity is the repeat module's business;
@@ -983,7 +992,7 @@ impl<S: Store> Engine<S> {
         })?;
 
         match spawn {
-            Some(plan) => self.node(&plan.id),
+            Some(plan) => self.node(&plan.root.id),
             None => Ok(None),
         }
     }
@@ -1053,40 +1062,100 @@ impl<S: Store> Engine<S> {
             return Ok(None);
         };
 
-        // A fresh Y.Text seeded with the origin's text, exactly as
-        // `duplicate_node` reasons: clean minimal history, not inherited edits.
-        let body_state = if node.body_md.is_empty() {
+        let open = self.default_status(StatusCategory::Open)?;
+        let root = self.spawn_row(
+            node,
+            node.parent_id.clone(),
+            self.order_key_between(node.parent_id.as_deref(), Some(&node.id))?,
+            &open,
+        )?;
+
+        // The checklist, breadth-first, each sub-item under its copied parent.
+        // Order keys are copied verbatim: a sibling set under a fresh parent is
+        // a fresh namespace, so the originals' keys stay valid and in order.
+        let mut children = Vec::new();
+        let mut queue: Vec<(String, String)> = self
+            .sibling_keys(Some(&node.id))?
+            .into_iter()
+            .map(|(child, _)| (child, root.id.clone()))
+            .collect();
+        while !queue.is_empty() {
+            let (child_id, new_parent) = queue.remove(0);
+            let Some(child) = self.node(&child_id)? else {
+                continue;
+            };
+            let row = self.spawn_row(&child, Some(new_parent), child.order_key.clone(), &open)?;
+            for (grandchild, _) in self.sibling_keys(Some(&child_id))? {
+                queue.push((grandchild, row.id.clone()));
+            }
+            children.push(row);
+        }
+
+        Ok(Some(SpawnPlan {
+            root,
+            scheduled_for: next_day,
+            rule: repeat::canonical(rule),
+            children,
+        }))
+    }
+
+    /// A fresh row for `source`: new id, a Y.Text seeded with the source's text
+    /// (exactly as `duplicate_node` reasons — clean minimal history, not
+    /// inherited edits), and the default open status whatever the source's was.
+    fn spawn_row(
+        &self,
+        source: &NodeView,
+        parent_id: Option<String>,
+        order_key: String,
+        status: &str,
+    ) -> Result<SpawnRow> {
+        let body_state = if source.body_md.is_empty() {
             String::new()
         } else {
             let mut body = load_body("", self.body_client_id())?;
-            apply_text_change(&mut body, &node.body_md)?;
+            apply_text_change(&mut body, &source.body_md)?;
             b64::encode(body.snapshot()?.as_bytes())
         };
-
-        Ok(Some(SpawnPlan {
+        Ok(SpawnRow {
             id: new_id().to_string(),
-            origin_id: node.id.clone(),
-            parent_id: node.parent_id.clone(),
-            kind: node.kind.as_str().to_owned(),
-            promoted: node.promoted,
-            title: node.title.clone(),
-            body_md: node.body_md.clone(),
+            origin_id: source.id.clone(),
+            parent_id,
+            kind: source.kind.as_str().to_owned(),
+            promoted: source.promoted,
+            title: source.title.clone(),
+            body_md: source.body_md.clone(),
             body_state,
-            status: self.default_status(StatusCategory::Open)?,
-            order_key: self.order_key_between(node.parent_id.as_deref(), Some(&node.id))?,
-            scheduled_for: next_day,
-            rule: repeat::canonical(rule),
-        }))
+            status: status.to_owned(),
+            order_key,
+        })
     }
 
     /// Insert the next occurrence. Called inside the completion's transaction.
     ///
-    /// The spawn's `created` event carries `{"repeat_of": …}` so the EOD report
-    /// can tell scheduling machinery from work the user captured. The rule
-    /// *moves* to the new occurrence — exactly one node in a chain carries it,
-    /// so manually reopening and re-finishing the old one cannot mint
-    /// duplicate futures.
+    /// Every spawned row's `created` event carries `{"repeat_of": …}` so the
+    /// EOD report can tell scheduling machinery from work the user captured.
+    /// The rule *moves* to the new occurrence — exactly one node in a chain
+    /// carries it, so manually reopening and re-finishing the old one cannot
+    /// mint duplicate futures.
     fn insert_spawn(&self, plan: &SpawnPlan, at: &Hlc) -> Result<()> {
+        self.insert_spawn_row(&plan.root, Some(&plan.scheduled_for), Some(&plan.rule), at)?;
+        self.store.execute(
+            "UPDATE node SET repeat_rule = NULL WHERE account_id = ? AND id = ?",
+            &[self.account(), plan.root.origin_id.as_str().into()],
+        )?;
+        for child in &plan.children {
+            self.insert_spawn_row(child, None, None, at)?;
+        }
+        Ok(())
+    }
+
+    fn insert_spawn_row(
+        &self,
+        row: &SpawnRow,
+        scheduled_for: Option<&str>,
+        rule: Option<&str>,
+        at: &Hlc,
+    ) -> Result<()> {
         let now = at.wall_ms as i64;
         let hlc = at.to_string();
         self.store.execute(
@@ -1095,25 +1164,21 @@ impl<S: Store> Engine<S> {
              repeat_rule) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             &[
                 self.account(),
-                plan.id.as_str().into(),
-                plan.parent_id.clone().into(),
-                plan.kind.as_str().into(),
-                i64::from(plan.promoted).into(),
-                plan.title.as_str().into(),
-                plan.body_md.as_str().into(),
-                plan.body_state.as_str().into(),
-                plan.status.as_str().into(),
-                plan.order_key.as_str().into(),
+                row.id.as_str().into(),
+                row.parent_id.clone().into(),
+                row.kind.as_str().into(),
+                i64::from(row.promoted).into(),
+                row.title.as_str().into(),
+                row.body_md.as_str().into(),
+                row.body_state.as_str().into(),
+                row.status.as_str().into(),
+                row.order_key.as_str().into(),
                 now.into(),
                 now.into(),
                 hlc.as_str().into(),
-                plan.scheduled_for.as_str().into(),
-                plan.rule.as_str().into(),
+                scheduled_for.map(str::to_owned).into(),
+                rule.map(str::to_owned).into(),
             ],
-        )?;
-        self.store.execute(
-            "UPDATE node SET repeat_rule = NULL WHERE account_id = ? AND id = ?",
-            &[self.account(), plan.origin_id.as_str().into()],
         )?;
         // Tags and collection memberships travel — next week's watering is
         // still #home and still in the same collection.
@@ -1122,11 +1187,11 @@ impl<S: Store> Engine<S> {
              SELECT account_id, ?, tag_id, ?, 0, ? FROM node_tag \
              WHERE account_id = ? AND node_id = ? AND deleted = 0",
             &[
-                plan.id.as_str().into(),
+                row.id.as_str().into(),
                 now.into(),
                 hlc.as_str().into(),
                 self.account(),
-                plan.origin_id.as_str().into(),
+                row.origin_id.as_str().into(),
             ],
         )?;
         self.store.execute(
@@ -1135,19 +1200,19 @@ impl<S: Store> Engine<S> {
              SELECT account_id, ?, collection_id, order_key, 0, ? FROM node_collection \
              WHERE account_id = ? AND node_id = ? AND tombstone = 0",
             &[
-                plan.id.as_str().into(),
+                row.id.as_str().into(),
                 hlc.as_str().into(),
                 self.account(),
-                plan.origin_id.as_str().into(),
+                row.origin_id.as_str().into(),
             ],
         )?;
         self.emit(
             at,
-            &plan.id,
+            &row.id,
             EventType::Created,
             None,
-            Some(&plan.title),
-            Some(&format!(r#"{{"repeat_of":"{}"}}"#, plan.origin_id)),
+            Some(&row.title),
+            Some(&format!(r#"{{"repeat_of":"{}"}}"#, row.origin_id)),
         )
     }
 
@@ -2439,6 +2504,64 @@ mod tests {
         e.toggle_done(&node.id, TODAY).unwrap();
         let again = e.toggle_done(&node.id, TODAY).unwrap();
         assert!(again.is_none(), "a rule-less completion spawned");
+    }
+
+    #[test]
+    fn a_spawned_occurrence_brings_its_checklist_back_fresh() {
+        let e = engine();
+        let review = e.create_node(None, "Weekly review", None).unwrap();
+        let inbox = e
+            .create_node(Some(&review.id), "Clear the inbox", None)
+            .unwrap();
+        let plan = e
+            .create_node(Some(&review.id), "Plan next week", Some(&inbox.id))
+            .unwrap();
+        e.create_node(Some(&plan.id), "Pick three priorities", None)
+            .unwrap();
+        e.add_tag(&inbox.id, "email").unwrap();
+        // One sub-item already finished: the copy must still come back open.
+        e.toggle_done(&inbox.id, TODAY).unwrap();
+        e.set_repeat(&review.id, Some("every week")).unwrap();
+
+        let spawned = e.toggle_done(&review.id, TODAY).unwrap().expect("no spawn");
+        let tree = e.list_tree().unwrap();
+        let copied: Vec<&NodeView> = tree
+            .iter()
+            .filter(|n| n.parent_id.as_deref() == Some(spawned.id.as_str()))
+            .collect();
+        assert_eq!(
+            copied.iter().map(|n| n.title.as_str()).collect::<Vec<_>>(),
+            vec!["Clear the inbox", "Plan next week"],
+            "checklist must come back in order"
+        );
+        assert!(
+            copied
+                .iter()
+                .all(|n| n.status_category == StatusCategory::Open),
+            "sub-items must come back open"
+        );
+        assert_eq!(copied[0].tags[0].name, "email");
+        assert!(copied
+            .iter()
+            .all(|n| n.repeat_rule.is_none() && n.scheduled_for.is_none()));
+
+        let nested = tree
+            .iter()
+            .find(|n| n.parent_id.as_deref() == Some(copied[1].id.as_str()))
+            .expect("nested sub-item missing");
+        assert_eq!(nested.title, "Pick three priorities");
+
+        // The finished checklist is history and stays finished.
+        assert_eq!(
+            e.node(&inbox.id).unwrap().unwrap().status_category,
+            StatusCategory::Done
+        );
+        // Every copied row is marked as machinery, like the root.
+        let events = e.events_for_node(&copied[0].id).unwrap();
+        assert!(events[0]
+            .payload
+            .as_deref()
+            .is_some_and(|p| p.contains("repeat_of")));
     }
 
     #[test]

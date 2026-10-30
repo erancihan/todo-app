@@ -8,6 +8,7 @@ import {
   nextMondayKey,
 } from "./list-controller";
 import type { EnginePort, NodeView } from "./engine-port";
+import { subscribeToasts, type ToastMessage } from "./toast";
 
 /**
  * A fake engine holding a flat tree, so the controller's own logic — visibility,
@@ -778,6 +779,22 @@ describe("repeating todos", () => {
     expect(engine.toggleDone).toHaveBeenCalledTimes(2);
     expect(engine.deleteNode).toHaveBeenCalledWith("spawn");
     expect(engine.setRepeat).toHaveBeenCalledWith("root", "every monday");
+  });
+
+  it("announces the next occurrence when a completion spawns one", async () => {
+    const engine = fakeEngine([node({ id: "root", repeatRule: "every monday" })]);
+    (engine.toggleDone as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      node({ id: "spawn", scheduledFor: "2026-09-07", repeatRule: "every monday" }),
+    );
+    const c = new ListController(engine, host);
+    await c.refresh();
+    const seen: { last: ToastMessage | null } = { last: null };
+    const stop = subscribeToasts((m) => (seen.last = m));
+
+    await c.dispatch("toggle-done");
+    stop();
+    expect(seen.last?.text).toContain("next planned for");
+    expect(seen.last?.text).toContain("7");
   });
 
   it("undoing a plain completion deletes nothing", async () => {

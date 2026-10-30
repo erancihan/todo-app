@@ -24,7 +24,15 @@ import type {
   TagView,
 } from "./engine-port";
 import { parseRepeatToken } from "./date-token";
+import {
+  endOfLocalDay,
+  formatDayKey,
+  localDayKey,
+  nextMondayKey,
+  startOfTodayMs,
+} from "./day";
 import { fromEvent, resolveKey, shouldPreventDefault, type Action, type Mode } from "./keymap";
+import { toast } from "./toast";
 
 /**
  * The standard rail of a personal tracker (the Things-shaped consensus): Today
@@ -1227,6 +1235,7 @@ export class ListController {
       ok = true;
     });
     if (!ok) return;
+    this.announceSpawn(spawned);
     const box = { spawnId: (spawned as NodeView | null)?.id ?? null };
     this.remember({
       label: "toggle done",
@@ -1265,6 +1274,7 @@ export class ListController {
       ok = true;
     });
     if (!ok || !previous || previous === status) return;
+    this.announceSpawn(spawned);
     const box = { spawnId: (spawned as NodeView | null)?.id ?? null };
     this.remember({
       label: "status",
@@ -1281,6 +1291,21 @@ export class ListController {
         box.spawnId = again?.id ?? null;
       },
     });
+  }
+
+  /**
+   * The one piece of feedback a repeat needs. The spawned occurrence usually
+   * lands in Upcoming — invisible from the Today view where the completion
+   * happened — so without this line, finishing a repeating todo looks exactly
+   * like finishing a one-off.
+   */
+  private announceSpawn(spawned: NodeView | null): void {
+    if (!spawned) return;
+    toast(
+      spawned.scheduledFor
+        ? `Repeats — next planned for ${formatDayKey(spawned.scheduledFor)}`
+        : "Repeats — next occurrence added",
+    );
   }
 
   /** The detail rail's repeat field. The engine validates and canonicalizes. */
@@ -1457,17 +1482,7 @@ export class ListController {
 }
 
 /** The next Monday strictly after today — the "next week" everyone means. */
-export function nextMondayKey(): string {
-  const d = new Date();
-  const days = ((8 - d.getDay()) % 7) || 7;
-  d.setDate(d.getDate() + days);
-  return localDayKey(d);
-}
-
-/** Start of the local today, in ms. */
-function startOfTodayMs(): number {
-  return new Date(`${localDayKey(new Date())}T00:00:00`).getTime();
-}
+export { dueDayValue, endOfLocalDay, localDayKey, nextMondayKey } from "./day";
 
 /**
  * Whether a node belongs to a rail view.
@@ -1512,28 +1527,4 @@ export function matchesView(n: NodeView, view: View): boolean {
     case "all":
       return open || finishedToday;
   }
-}
-
-/**
- * `YYYY-MM-DD` for a Date in the *local* timezone.
- *
- * Not `toISOString().slice(0, 10)`: that converts to UTC first, so anyone east
- * of Greenwich in the evening — or west of it in the morning — would get
- * yesterday's or tomorrow's report without being told.
- */
-export function localDayKey(date: Date): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-}
-
-/** The last millisecond of a local `YYYY-MM-DD`. */
-export function endOfLocalDay(day: string): number {
-  const date = new Date(`${day}T00:00:00`);
-  date.setDate(date.getDate() + 1);
-  return date.getTime() - 1;
-}
-
-/** A due timestamp back to the `YYYY-MM-DD` an `<input type="date">` wants. */
-export function dueDayValue(ms: number | null): string {
-  return ms ? localDayKey(new Date(ms)) : "";
 }

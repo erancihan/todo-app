@@ -815,6 +815,22 @@ mod tests {
     }
 
     #[test]
+    fn a_spawned_checklist_is_not_todays_news_either() {
+        let e = engine();
+        let node = e.create_node(None, "Weekly review", None).unwrap();
+        e.create_node(Some(&node.id), "Clear the inbox", None)
+            .unwrap();
+        e.set_repeat(&node.id, Some("every week")).unwrap();
+        e.toggle_done(&node.id, TODAY).unwrap().expect("no spawn");
+
+        let report = e.generate_report(&today(&e)).unwrap();
+        // The one CREATED is the original sub-item, captured today. The spawned
+        // review and its copied sub-item add nothing.
+        assert_eq!(report.counts.completed, 1);
+        assert_eq!(report.counts.created, 1);
+    }
+
+    #[test]
     fn work_from_an_earlier_day_is_not_todays_news() {
         let e = engine();
         e.create_node(None, "Yesterday", None).unwrap();

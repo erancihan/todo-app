@@ -25,8 +25,18 @@ function findChromium() {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH;
   const root = process.env.PLAYWRIGHT_BROWSERS_PATH || "/opt/pw-browsers";
   if (existsSync(root)) {
+    // A root-level `chromium` link is the install's own pointer to the right
+    // binary; prefer it over guessing a build directory.
+    const linked = join(root, "chromium");
+    if (existsSync(linked)) return linked;
     for (const dir of readdirSync(root).filter((d) => d.startsWith("chromium")).sort().reverse()) {
-      for (const rel of ["chrome-linux/chrome", "chrome-linux/headless_shell"]) {
+      // Playwright moved from `chrome-linux/` to `chrome-linux64/` across
+      // releases; both layouts are still in the wild.
+      for (const rel of [
+        "chrome-linux64/chrome",
+        "chrome-linux/chrome",
+        "chrome-linux/headless_shell",
+      ]) {
         const candidate = join(root, dir, rel);
         if (existsSync(candidate)) return candidate;
       }
@@ -549,12 +559,18 @@ try {
         Boolean(openPart?.scheduledFor) &&
         Boolean(donePart?.scheduledFor) &&
         openPart.scheduledFor > donePart.scheduledFor,
+      toast: document.querySelector("[role=status]")?.textContent ?? "",
     };
   });
   check(
     "completing it spawns the next occurrence and moves the rule",
     chain.count === 2 && chain.doneKeepsNoRule && chain.openCarriesRule && chain.advanced,
     JSON.stringify(chain),
+  );
+  check(
+    "the completion says when the next occurrence is planned",
+    chain.toast.includes("next planned for"),
+    JSON.stringify(chain.toast),
   );
 
   // --- user-defined statuses ----------------------------------------------

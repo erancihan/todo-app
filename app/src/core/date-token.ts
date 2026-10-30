@@ -11,7 +11,7 @@
  * reads the real clock inline is date code that fails twice a year.
  */
 
-import { localDayKey } from "./list-controller";
+import { formatDay, localDayKey } from "./day";
 
 export interface ParsedDay {
   /** The resolved civil day, `YYYY-MM-DD`. */
@@ -46,7 +46,7 @@ const MONTHS = [
 ] as const;
 
 function preview(d: Date): string {
-  return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  return formatDay(d);
 }
 
 function toParsed(d: Date): ParsedDay {
